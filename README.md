@@ -1,8 +1,8 @@
 # ocaml-idna
 
-IDNA2008 ([RFC 5890](https://www.rfc-editor.org/rfc/rfc5890)/[RFC 5892](https://www.rfc-editor.org/rfc/rfc5892)) hostname validation and [Punycode](https://www.rfc-editor.org/rfc/rfc3492) (RFC 3492) encoding/decoding for OCaml.
+Internationalized domain name validation, [Punycode](https://www.rfc-editor.org/rfc/rfc3492) (RFC 3492) encoding/decoding, and Unicode NFC normalization for OCaml.
 
-Pure OCaml, no C dependencies. Uses Unicode 16.0.0 character tables.
+Implements IDNA2008 ([RFC 5890](https://www.rfc-editor.org/rfc/rfc5890), [RFC 5891](https://www.rfc-editor.org/rfc/rfc5891), [RFC 5892](https://www.rfc-editor.org/rfc/rfc5892), [RFC 5893](https://www.rfc-editor.org/rfc/rfc5893)). Pure OCaml, no C dependencies. Unicode 16.0.0 character tables.
 
 ## Installation
 
@@ -22,33 +22,28 @@ Idna.check_label "xn--X"                      (* Error "invalid punycode" *)
 
 Idna.Punycode.decode "maana-pta"              (* Ok [0x6D; 0x61; 0xF1; ...] *)
 Idna.Punycode.encode [0x6D;0x61;0xF1;0x61;0x6E;0x61]  (* Ok "maana-pta" *)
+
+Idna.nfc [0x0065; 0x0301]                    (* [0x00E9] — e + acute → é *)
 ```
 
-## What it validates
+## Features
 
-- Hyphen rules (no leading/trailing hyphen, no `--` at positions 3-4)
-- Label length (1-63 octets for A-labels, hostname max 253)
-- Codepoint validity (PVALID, CONTEXTJ, CONTEXTO per RFC 5892)
-- NFC normalization check (Quick Check + composition pair detection)
+- Hostname and label validation (RFC 5891 Sections 4-5)
+- Codepoint classification (PVALID, CONTEXTJ, CONTEXTO per RFC 5892)
+- Hyphen rules, label and hostname length limits
+- NFC normalization (canonical decomposition, ordering, composition; Hangul syllables)
+- Bidirectional text rules 1-6 (RFC 5893), including domain-level enforcement
+- A-label (xn--) Punycode encoding and decoding (case-insensitive prefix)
 - Initial combining mark rejection
-- Bidi rules 1-6 (RFC 5893), including domain-level enforcement
-- A-label (xn--) Punycode encoding/decoding and validation (case-insensitive prefix)
-- U-label DNS length check via Punycode encode (A-label must be 1-63 octets)
-
-## Verified against
-
-- Unicode IdnaTestV2.txt: 3362/3362 validation (100%), 386/386 encode (100%)
-- RFC 3492 Section 7.1: all 19 test vectors (encode + decode + roundtrip)
+- CONTEXTJ/CONTEXTO contextual rules
 
 ## Not implemented
 
-- NFC normalization (only detection, not transformation)
-- ToASCII / ToUnicode protocol operations (RFC 5891)
-- UTS #46 mapping/processing
+- [UTS #46](https://www.unicode.org/reports/tr46/) mapping and compatibility processing
 
 ## Regenerating Unicode tables
 
-Tables are pre-generated from Unicode 16.0.0 UCD. To regenerate:
+Tables are generated from Unicode 16.0.0 UCD:
 
 ```
 ./tools/download_ucd.sh 16.0.0

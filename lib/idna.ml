@@ -1,5 +1,171 @@
 (** IDNA2008 (RFC 5890/5892) hostname validation. *)
 
+(* ── NFC normalization (UAX #15) ── *)
+
+(** Hangul constants. *)
+let s_base = 0xAC00
+let l_base = 0x1100
+let v_base = 0x1161
+let t_base = 0x11A7
+let l_count = 19
+let v_count = 21
+let t_count = 28
+let n_count = v_count * t_count  (* 588 *)
+let s_count = l_count * n_count  (* 11172 *)
+
+(** Lookup canonical combining class. *)
+let ccc cp =
+  let arr = Idna_tables.canon_ccc in
+  let len = Array.length arr in
+  let lo = ref 0 in
+  let hi = ref (len - 1) in
+  while !lo <= !hi do
+    let mid = !lo + (!hi - !lo) / 2 in
+    let (mcp, _) = arr.(mid) in
+    if mcp < cp then lo := mid + 1
+    else if mcp > cp then hi := mid - 1
+    else (lo := mid; hi := mid - 1)
+  done;
+  if !lo < len then
+    let (mcp, c) = arr.(!lo) in
+    if mcp = cp then c else 0
+  else 0
+
+(** Lookup canonical decomposition. Returns None if no decomposition. *)
+let canon_decomp_lookup cp =
+  let arr = Idna_tables.canon_decomp in
+  let len = Array.length arr in
+  let lo = ref 0 in
+  let hi = ref (len - 1) in
+  while !lo <= !hi do
+    let mid = !lo + (!hi - !lo) / 2 in
+    let (mcp, _, _) = arr.(mid) in
+    if mcp < cp then lo := mid + 1
+    else if mcp > cp then hi := mid - 1
+    else (lo := mid; hi := mid - 1)
+  done;
+  if !lo < len then
+    let (mcp, d1, d2) = arr.(!lo) in
+    if mcp = cp then
+      if d2 = 0 then Some [d1] else Some [d1; d2]
+    else None
+  else None
+
+(** Hangul syllable decomposition. *)
+let hangul_decomp cp =
+  if cp >= s_base && cp < s_base + s_count then
+    let s_index = cp - s_base in
+    let l = l_base + s_index / n_count in
+    let v = v_base + (s_index mod n_count) / t_count in
+    let t = t_base + s_index mod t_count in
+    if t = t_base then Some [l; v] else Some [l; v; t]
+  else None
+
+(** Full canonical decomposition (recursive). *)
+let decompose cps =
+  let result = ref [] in
+  let rec decomp cp =
+    match hangul_decomp cp with
+    | Some parts -> List.iter decomp parts
+    | None ->
+      match canon_decomp_lookup cp with
+      | Some parts -> List.iter decomp parts
+      | None -> result := cp :: !result
+  in
+  List.iter decomp cps;
+  List.rev !result
+
+(** Canonical ordering: sort consecutive combining marks by CCC. *)
+let canonical_order cps =
+  let arr = Array.of_list cps in
+  let len = Array.length arr in
+  (* Bubble sort on consecutive combining marks *)
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    for i = 0 to len - 2 do
+      let cc_a = ccc arr.(i) in
+      let cc_b = ccc arr.(i + 1) in
+      if cc_a > 0 && cc_b > 0 && cc_a > cc_b then begin
+        let tmp = arr.(i) in
+        arr.(i) <- arr.(i + 1);
+        arr.(i + 1) <- tmp;
+        changed := true
+      end
+    done
+  done;
+  Array.to_list arr
+
+(** Lookup composition: (starter, combining) → composite or None. *)
+let compose_lookup starter combining =
+  (* Hangul L + V → LV *)
+  if starter >= l_base && starter < l_base + l_count
+     && combining >= v_base && combining < v_base + v_count then
+    let l_index = starter - l_base in
+    let v_index = combining - v_base in
+    Some (s_base + (l_index * v_count + v_index) * t_count)
+  (* Hangul LV + T → LVT *)
+  else if starter >= s_base && starter < s_base + s_count
+          && (starter - s_base) mod t_count = 0
+          && combining > t_base && combining < t_base + t_count then
+    Some (starter + combining - t_base)
+  else
+    let key = (starter lsl 21) lor combining in
+    let arr = Idna_tables.nfc_compositions in
+    let len = Array.length arr in
+    let lo = ref 0 in
+    let hi = ref (len - 1) in
+    while !lo <= !hi do
+      let mid = !lo + (!hi - !lo) / 2 in
+      let (mkey, _) = arr.(mid) in
+      if mkey < key then lo := mid + 1
+      else if mkey > key then hi := mid - 1
+      else (lo := mid; hi := mid - 1)
+    done;
+    if !lo < len then
+      let (mkey, composite) = arr.(!lo) in
+      if mkey = key then Some composite else None
+    else None
+
+(** Canonical composition: scan left-to-right, compose where possible. *)
+let compose cps =
+  let len = List.length cps in
+  if len = 0 then []
+  else
+    let arr = Array.of_list cps in
+    (* -1 marks composed-away slots *)
+    let starter_pos = ref 0 in
+    let last_cc = ref 0 in
+    for i = 1 to len - 1 do
+      let cp = arr.(i) in
+      let cp_cc = ccc cp in
+      let blocked = !last_cc <> 0 && !last_cc >= cp_cc in
+      if not blocked then begin
+        match compose_lookup arr.(!starter_pos) cp with
+        | Some composite ->
+          arr.(!starter_pos) <- composite;
+          arr.(i) <- -1;
+          (* Don't update last_cc — composed char is gone *)
+        | None ->
+          if cp_cc = 0 then begin
+            starter_pos := i;
+            last_cc := 0
+          end else
+            last_cc := cp_cc
+      end else begin
+        if cp_cc = 0 then begin
+          starter_pos := i;
+          last_cc := 0
+        end else
+          last_cc := cp_cc
+      end
+    done;
+    Array.to_list arr |> List.filter (fun cp -> cp >= 0)
+
+(** NFC normalization: decompose → canonical order → compose. *)
+let nfc cps =
+  cps |> decompose |> canonical_order |> compose
+
 (** Decode UTF-8 string to codepoint list. *)
 let utf8_to_cps s =
   let len = String.length s in
@@ -45,18 +211,7 @@ let check_initial_combiner cps =
 
 (** Check if (starter, combining) is a canonical composition pair. *)
 let nfc_composes starter combining =
-  let key = (starter lsl 21) lor combining in
-  let arr = Idna_tables.nfc_compositions in
-  let len = Array.length arr in
-  let lo = ref 0 in
-  let hi = ref (len - 1) in
-  while !lo <= !hi do
-    let mid = !lo + (!hi - !lo) / 2 in
-    if arr.(mid) < key then lo := mid + 1
-    else if arr.(mid) > key then hi := mid - 1
-    else (lo := mid; hi := mid - 1)
-  done;
-  !lo < len && arr.(!lo) = key
+  compose_lookup starter combining <> None
 
 (** Check NFC Quick Check — reject if any codepoint has NFC_QC=No,
     or if NFC_QC=Maybe and preceding starter composes with it. *)

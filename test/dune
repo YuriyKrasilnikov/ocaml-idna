@@ -5,3 +5,7 @@
 (executable
  (name test_idna_vectors)
  (libraries idna str))
+
+(executable
+ (name test_nfc)
+ (libraries idna))

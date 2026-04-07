@@ -368,20 +368,80 @@ def main():
                 if cp not in composition_exclusions:
                     composition_pairs[(starter, combining)] = cp
 
-    # Emit as sorted array of packed keys for binary search
+    # Emit as sorted array of (packed_key, composite) for binary search
     # Key = starter lsl 21 lor combining (both fit in 21 bits)
     print(f"(* NFC composition pairs: {len(composition_pairs)} entries *)")
     print("let nfc_compositions = [|")
     for (starter, combining) in sorted(composition_pairs.keys()):
+        composite = composition_pairs[(starter, combining)]
         key = (starter << 21) | combining
-        print(f"  0x{key:010x}; (* U+{starter:04X} + U+{combining:04X} *)")
+        print(f"  (0x{key:010x}, 0x{composite:04X}); (* U+{starter:04X} + U+{combining:04X} → U+{composite:04X} *)")
+    print("|]")
+    print()
+
+    # ── NFC normalization tables ──
+
+    # Canonical decomposition mappings: cp → (d1, d2) or cp → (d1, 0) for single
+    # Only canonical (no <tag>), excluding Hangul (algorithmic)
+    canon_decomp = {}
+    with open(os.path.join(UCD_DIR, "UnicodeData.txt")) as f:
+        for line in f:
+            fields = line.strip().split(";")
+            cp = int(fields[0], 16)
+            decomp = fields[5]
+            if not decomp or decomp.startswith("<"):
+                continue
+            parts = [int(x, 16) for x in decomp.split()]
+            # Skip Hangul syllables (algorithmic)
+            if 0xAC00 <= cp <= 0xD7A3:
+                continue
+            canon_decomp[cp] = parts
+
+    print(f"(* Canonical decomposition: {len(canon_decomp)} entries *)")
+    print("let canon_decomp = [|")
+    for cp in sorted(canon_decomp.keys()):
+        parts = canon_decomp[cp]
+        if len(parts) == 1:
+            print(f"  (0x{cp:04X}, 0x{parts[0]:04X}, 0); (* U+{cp:04X} → U+{parts[0]:04X} *)")
+        elif len(parts) == 2:
+            print(f"  (0x{cp:04X}, 0x{parts[0]:04X}, 0x{parts[1]:04X}); (* U+{cp:04X} → U+{parts[0]:04X} U+{parts[1]:04X} *)")
+        else:
+            # Longer decompositions: store first two, rest handled recursively
+            print(f"  (0x{cp:04X}, 0x{parts[0]:04X}, 0x{parts[1]:04X}); (* U+{cp:04X} → {' '.join(f'U+{p:04X}' for p in parts)} (truncated) *)")
+    print("|]")
+    print()
+
+    # Canonical Combining Class: only non-zero entries
+    ccc_map = {}
+    with open(os.path.join(UCD_DIR, "UnicodeData.txt")) as f:
+        range_begin = None
+        for line in f:
+            fields = line.strip().split(";")
+            cp = int(fields[0], 16)
+            ccc = int(fields[3])
+            name = fields[1]
+            if name.endswith(", First>"):
+                range_begin = (cp, ccc)
+            elif name.endswith(", Last>"):
+                if range_begin and range_begin[1] > 0:
+                    for i in range(range_begin[0], cp + 1):
+                        ccc_map[i] = range_begin[1]
+                range_begin = None
+            elif ccc > 0:
+                ccc_map[cp] = ccc
+
+    # Emit as sorted (cp, ccc) array for binary search
+    print(f"(* Canonical Combining Class: {len(ccc_map)} non-zero entries *)")
+    print("let canon_ccc = [|")
+    for cp in sorted(ccc_map.keys()):
+        print(f"  (0x{cp:04X}, {ccc_map[cp]});")
     print("|]")
     print()
 
     # Stats
     print(f"(* Stats: PVALID={len(classes['PVALID'])}, CONTEXTJ={len(classes['CONTEXTJ'])}, CONTEXTO={len(classes['CONTEXTO'])} *)")
     print(f"(* Bidi classes: {', '.join(f'{k}={len(v)}' for k,v in sorted(bidi_classes.items()))} *)")
-    print(f"(* NFC_QC: No={len(nfc_no)}, Maybe={len(nfc_maybe)} *)")
+    print(f"(* NFC: QC_No={len(nfc_no)}, QC_Maybe={len(nfc_maybe)}, Decomp={len(canon_decomp)}, CCC={len(ccc_map)}, Compositions={len(composition_pairs)} *)")
 
 if __name__ == "__main__":
     import argparse
