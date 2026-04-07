@@ -243,6 +243,97 @@ let () =
     end
   done with End_of_file -> ());
   close_in ic;
+
+  (* ── Encode verification: toAsciiN ── *)
+  (* For valid entries with a toAsciiN value, encode U-labels and compare *)
+  let ic2 = open_in path in
+  let enc_total = ref 0 in
+  let enc_pass = ref 0 in
+  let enc_fail = ref 0 in
+  let enc_fail_examples = Buffer.create 1024 in
+  let enc_fail_count = ref 0 in
+  (try while true do
+    let line = input_line ic2 in
+    let line = strip line in
+    if String.length line = 0 || line.[0] = '#' || line.[0] = '@' then ()
+    else begin
+      let data = match String.index_opt line '#' with
+        | Some pos -> String.sub line 0 pos
+        | None -> line
+      in
+      let cols = String.split_on_char ';' data in
+      match cols with
+      | _source_raw :: to_unicode_raw :: to_unicode_status
+        :: to_ascii_n_raw :: to_ascii_n_status :: _ ->
+        let to_unicode = decode_escapes (strip to_unicode_raw) in
+        let to_unicode_resolved =
+          if String.length (strip to_unicode_raw) = 0 then
+            decode_escapes (strip _source_raw)
+          else to_unicode
+        in
+        let to_ascii_n = strip to_ascii_n_raw in
+        let to_ascii_n_resolved =
+          if String.length to_ascii_n = 0 then strip to_unicode_raw
+          else to_ascii_n
+        in
+        let to_ascii_n_resolved =
+          if String.length to_ascii_n_resolved = 0 then strip _source_raw
+          else to_ascii_n_resolved
+        in
+        let to_ascii_n_decoded = decode_escapes to_ascii_n_resolved in
+        (* Only test valid entries: no toUnicode errors AND no toAsciiN errors *)
+        let unicode_err = has_errors to_unicode_status in
+        let ascii_err = has_errors (strip to_ascii_n_status) in
+        if (not unicode_err) && (not ascii_err)
+           && String.length to_ascii_n_decoded > 0
+           && not (string_has_nv8_xv8 nv8_ranges to_unicode_resolved)
+        then begin
+          incr enc_total;
+          (* Encode each label: if U-label, encode to xn-- form *)
+          let expected_labels = String.split_on_char '.' to_ascii_n_decoded in
+          let unicode_str =
+            let s = to_unicode_resolved in
+            let len = String.length s in
+            if len > 0 && s.[len-1] = '.' then String.sub s 0 (len-1) else s
+          in
+          let actual_labels = String.split_on_char '.' unicode_str in
+          if List.length expected_labels = List.length actual_labels then begin
+            let all_match = List.for_all2 (fun expected actual ->
+              let actual_lower = String.lowercase_ascii actual in
+              let expected_lower = String.lowercase_ascii expected in
+              if actual_lower = expected_lower then true
+              else if String.to_seq actual |> Seq.for_all (fun c -> Char.code c < 0x80) then
+                actual_lower = expected_lower
+              else
+                (* U-label: encode to A-label *)
+                let cps = utf8_to_cps actual in
+                match Idna.Punycode.encode cps with
+                | Error _ -> false
+                | Ok encoded ->
+                  let a_label = "xn--" ^ encoded in
+                  String.lowercase_ascii a_label = expected_lower
+            ) expected_labels actual_labels in
+            if all_match then incr enc_pass
+            else begin
+              incr enc_fail;
+              if !enc_fail_count < 20 then begin
+                Buffer.add_string enc_fail_examples
+                  (Printf.sprintf "  encode: %s → expected %s\n"
+                     (String.escaped unicode_str)
+                     (String.escaped to_ascii_n_decoded));
+                incr enc_fail_count
+              end
+            end
+          end else begin
+            (* Label count mismatch — skip *)
+            decr enc_total
+          end
+        end
+      | _ -> ()
+    end
+  done with End_of_file -> ());
+  close_in ic2;
+
   Printf.printf "IdnaTestV2 IDNA2008 results:\n";
   Printf.printf "  total:  %d (after NV8/XV8 filter)\n" !total;
   Printf.printf "  pass:   %d\n" !pass;
@@ -257,6 +348,16 @@ let () =
     ) fail_by_cat
   end;
   if !fail > 0 then begin
-    Printf.printf "\nFirst %d failures:\n" (min !fail 20);
+    Printf.printf "\nFirst %d validation failures:\n" (min !fail 20);
     print_string (Buffer.contents fail_examples)
+  end;
+  Printf.printf "\nEncode (toAsciiN) results:\n";
+  Printf.printf "  total:  %d\n" !enc_total;
+  Printf.printf "  pass:   %d\n" !enc_pass;
+  Printf.printf "  fail:   %d\n" !enc_fail;
+  Printf.printf "  rate:   %.1f%%\n"
+    (if !enc_total > 0 then 100.0 *. float_of_int !enc_pass /. float_of_int !enc_total else 0.0);
+  if !enc_fail > 0 then begin
+    Printf.printf "\nFirst %d encode failures:\n" (min !enc_fail 20);
+    print_string (Buffer.contents enc_fail_examples)
   end

@@ -1,6 +1,6 @@
 # ocaml-idna
 
-IDNA2008 ([RFC 5890](https://www.rfc-editor.org/rfc/rfc5890)/[RFC 5892](https://www.rfc-editor.org/rfc/rfc5892)) hostname validation and [Punycode](https://www.rfc-editor.org/rfc/rfc3492) (RFC 3492) decoding for OCaml.
+IDNA2008 ([RFC 5890](https://www.rfc-editor.org/rfc/rfc5890)/[RFC 5892](https://www.rfc-editor.org/rfc/rfc5892)) hostname validation and [Punycode](https://www.rfc-editor.org/rfc/rfc3492) (RFC 3492) encoding/decoding for OCaml.
 
 Pure OCaml, no C dependencies. Uses Unicode 16.0.0 character tables.
 
@@ -21,6 +21,7 @@ Idna.check_label "xn--maana-pta"              (* Ok () *)
 Idna.check_label "xn--X"                      (* Error "invalid punycode" *)
 
 Idna.Punycode.decode "maana-pta"              (* Ok [0x6D; 0x61; 0xF1; ...] *)
+Idna.Punycode.encode [0x6D;0x61;0xF1;0x61;0x6E;0x61]  (* Ok "maana-pta" *)
 ```
 
 ## What it validates
@@ -31,16 +32,16 @@ Idna.Punycode.decode "maana-pta"              (* Ok [0x6D; 0x61; 0xF1; ...] *)
 - NFC normalization check (Quick Check + composition pair detection)
 - Initial combining mark rejection
 - Bidi rules 1-6 (RFC 5893), including domain-level enforcement
-- A-label (xn--) Punycode decoding and validation (case-insensitive prefix)
+- A-label (xn--) Punycode encoding/decoding and validation (case-insensitive prefix)
+- U-label DNS length check via Punycode encode (A-label must be 1-63 octets)
 
 ## Verified against
 
-- Unicode IdnaTestV2.txt: 3362/3362 (100%) after NV8/XV8 filter
-- RFC 3492 Section 7.1 test vectors
+- Unicode IdnaTestV2.txt: 3362/3362 validation (100%), 386/386 encode (100%)
+- RFC 3492 Section 7.1: all 19 test vectors (encode + decode + roundtrip)
 
 ## Not implemented
 
-- Punycode encoding (RFC 3492 Section 6.3)
 - NFC normalization (only detection, not transformation)
 - ToASCII / ToUnicode protocol operations (RFC 5891)
 - UTS #46 mapping/processing

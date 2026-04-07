@@ -21,8 +21,8 @@
  (synopsis "IDNA2008 and Punycode for OCaml (RFC 5890/5892/3492)")
  (description
   "Pure OCaml implementation of IDNA2008 (RFC 5890/5892) hostname validation
-   and Punycode (RFC 3492) decoding. Uses Unicode 16.0.0 character tables
-   with O(log n) codepoint lookup. No external C dependencies.")
+   and Punycode (RFC 3492) encoding/decoding. Uses Unicode 16.0.0 character
+   tables with O(log n) codepoint lookup. No external C dependencies.")
  (depends
   (ocaml (>= 5.1))
   (alcotest :with-test)))

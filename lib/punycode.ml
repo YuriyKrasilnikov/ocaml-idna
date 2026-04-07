@@ -1,4 +1,4 @@
-(** Punycode (RFC 3492) decoder. *)
+(** Punycode (RFC 3492) codec. *)
 
 let base = 36
 let tmin = 1
@@ -83,3 +83,68 @@ let decode input =
     done;
     Ok (Array.to_list (Array.sub output 0 !out_len))
   with Exit -> Error "invalid punycode"
+
+let encode_digit d =
+  if d < 26 then Char.chr (d + 97)      (* a-z *)
+  else Char.chr (d - 26 + 48)           (* 0-9 *)
+
+let encode input =
+  try
+  let buf = Buffer.create 64 in
+  let n = ref initial_n in
+  let delta = ref 0 in
+  let bias = ref initial_bias in
+  (* Copy basic codepoints (lowercased per Section 7.1) *)
+  let basic_count = ref 0 in
+  List.iter (fun cp ->
+    if cp < 0x80 then begin
+      let c = Char.chr cp in
+      Buffer.add_char buf (Char.lowercase_ascii c);
+      incr basic_count
+    end
+  ) input;
+  if !basic_count > 0 then Buffer.add_char buf '-';
+  let h = ref !basic_count in
+  let len = List.length input in
+  while !h < len do
+    (* Find minimum codepoint >= n *)
+    let m = ref max_int in
+    List.iter (fun cp -> if cp >= !n && cp < !m then m := cp) input;
+    (* Increase delta for skipped codepoints — overflow check (Section 6.4) *)
+    let step = !m - !n in
+    if step > (max_int - !delta) / (!h + 1) then
+      raise Exit;
+    delta := !delta + step * (!h + 1);
+    n := !m;
+    List.iter (fun cp ->
+      if cp < !n then incr delta
+      else if cp = !n then begin
+        (* Encode delta as variable-length integer *)
+        let q = ref !delta in
+        let k = ref base in
+        let cont = ref true in
+        while !cont do
+          let t =
+            if !k <= !bias + tmin then tmin
+            else if !k >= !bias + tmax then tmax
+            else !k - !bias
+          in
+          if !q < t then begin
+            Buffer.add_char buf (encode_digit !q);
+            cont := false
+          end else begin
+            Buffer.add_char buf (encode_digit (t + (!q - t) mod (base - t)));
+            q := (!q - t) / (base - t);
+            k := !k + base
+          end
+        done;
+        bias := adapt !delta (!h + 1) (!h = !basic_count);
+        delta := 0;
+        incr h
+      end
+    ) input;
+    incr delta;
+    incr n
+  done;
+  Ok (Buffer.contents buf)
+  with Exit -> Error "overflow"

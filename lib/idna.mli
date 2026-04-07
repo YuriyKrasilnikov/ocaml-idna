@@ -15,7 +15,8 @@ val check_label : string -> (unit, string) result
     Takes pre-split labels (strings). Returns true if bidi is ok. *)
 val is_valid_hostname_bidi : string list -> bool
 
-(** Punycode (RFC 3492) decoder. *)
+(** Punycode (RFC 3492) codec. *)
 module Punycode : sig
   val decode : string -> (int list, string) result
+  val encode : int list -> (string, string) result
 end

@@ -315,17 +315,22 @@ let is_valid_hostname s =
     if labels = [] then false
     else
       (* First pass: validate each label + DNS length constraint *)
-      (* ASCII/A-labels: 63-byte limit. U-labels: no byte limit here,
-         the constraint is on the A-label encoding. *)
       let all_ok = List.for_all (fun label ->
         let llen = String.length label in
-        let is_ascii = String.to_seq label |> Seq.for_all (fun c -> Char.code c < 0x80) in
         if llen = 0 then false
-        else if is_ascii && llen > 63 then false
+        else if String.to_seq label |> Seq.for_all (fun c -> Char.code c < 0x80) then
+          (* ASCII/A-label: 63-byte limit directly *)
+          llen <= 63 &&
+          (match check_label label with Ok () -> true | Error _ -> false)
         else
+          (* U-label: validate, then check A-label encoding length *)
           match check_label label with
-          | Ok () -> true
           | Error _ -> false
+          | Ok () ->
+            let cps = utf8_to_cps label in
+            match Punycode.encode cps with
+            | Error _ -> false
+            | Ok encoded -> String.length encoded + 4 <= 63  (* +4 for "xn--" *)
       ) labels in
       if not all_ok then false
       else
