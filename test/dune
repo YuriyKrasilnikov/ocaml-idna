@@ -1,3 +1,7 @@
 (tests
  (names test_punycode test_idna)
  (libraries idna alcotest))
+
+(executable
+ (name test_idna_vectors)
+ (libraries idna str))

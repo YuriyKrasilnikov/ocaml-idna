@@ -335,6 +335,49 @@ def main():
     emit_array("nfc_qc_no", to_ranges(nfc_no))
     emit_array("nfc_qc_maybe", to_ranges(nfc_maybe))
 
+    # NFC canonical composition pairs (for NFC_QC=Maybe verification)
+    # From UnicodeData.txt field 5: canonical decomposition (no <tag>)
+    # Composition exclusions: Full_Composition_Exclusion from DerivedNormalizationProps.txt
+    composition_exclusions = set()
+    with open(os.path.join(UCD_DIR, "DerivedNormalizationProps.txt")) as f:
+        for line in f:
+            line_clean = line.split("#")[0].strip()
+            if not line_clean:
+                continue
+            m = re.match(r"([0-9A-F]{4,6})(?:\.\.([0-9A-F]{4,6}))?\s*;\s*Full_Composition_Exclusion", line_clean)
+            if m:
+                start = int(m.group(1), 16)
+                end = int(m.group(2), 16) if m.group(2) else start
+                for i in range(start, end + 1):
+                    composition_exclusions.add(i)
+
+    # Build composition pairs: (starter, combining) → composite
+    composition_pairs = {}  # (starter, combining) → composite
+    with open(os.path.join(UCD_DIR, "UnicodeData.txt")) as f:
+        for line in f:
+            fields = line.strip().split(";")
+            cp = int(fields[0], 16)
+            decomp = fields[5]
+            if not decomp or decomp.startswith("<"):
+                continue  # Skip compatibility decompositions
+            parts = decomp.split()
+            if len(parts) == 2:
+                # Canonical 2-char decomposition: composite = parts[0] + parts[1]
+                starter = int(parts[0], 16)
+                combining = int(parts[1], 16)
+                if cp not in composition_exclusions:
+                    composition_pairs[(starter, combining)] = cp
+
+    # Emit as sorted array of packed keys for binary search
+    # Key = starter lsl 21 lor combining (both fit in 21 bits)
+    print(f"(* NFC composition pairs: {len(composition_pairs)} entries *)")
+    print("let nfc_compositions = [|")
+    for (starter, combining) in sorted(composition_pairs.keys()):
+        key = (starter << 21) | combining
+        print(f"  0x{key:010x}; (* U+{starter:04X} + U+{combining:04X} *)")
+    print("|]")
+    print()
+
     # Stats
     print(f"(* Stats: PVALID={len(classes['PVALID'])}, CONTEXTJ={len(classes['CONTEXTJ'])}, CONTEXTO={len(classes['CONTEXTO'])} *)")
     print(f"(* Bidi classes: {', '.join(f'{k}={len(v)}' for k,v in sorted(bidi_classes.items()))} *)")

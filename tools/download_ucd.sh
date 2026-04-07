@@ -31,5 +31,32 @@ for f in $FILES; do
     fi
 done
 
+# IDNA-specific files (from /Public/idna/)
+IDNA_URL="https://www.unicode.org/Public/idna/${VERSION}"
+IDNA_FILES="
+IdnaTestV2.txt
+IdnaMappingTable.txt
+"
+
+for f in $IDNA_FILES; do
+    out="$DIR/$(basename $f)"
+    if [ -f "$out" ]; then
+        echo "  exists: $out"
+    else
+        echo "  downloading: idna/$f -> $out"
+        wget -q "${IDNA_URL}/${f}" -O "$out" || curl -sL "${IDNA_URL}/${f}" -o "$out"
+    fi
+done
+
+# NormalizationTest.txt (for NFC verification)
+NFC_URL="${BASE_URL}/NormalizationTest.txt"
+NFC_OUT="$DIR/NormalizationTest.txt"
+if [ -f "$NFC_OUT" ]; then
+    echo "  exists: $NFC_OUT"
+else
+    echo "  downloading: NormalizationTest.txt -> $NFC_OUT"
+    wget -q "$NFC_URL" -O "$NFC_OUT" || curl -sL "$NFC_URL" -o "$NFC_OUT"
+fi
+
 echo "Done. UCD ${VERSION} in ${DIR}/"
 echo "Run: UCD_DIR=${DIR} python3 tools/gen_tables.py --dry-run"

@@ -43,11 +43,38 @@ let check_initial_combiner cps =
       Error "label begins with combining mark"
     else Ok ()
 
-(** Check NFC Quick Check — reject if any codepoint has NFC_QC=No. *)
+(** Check if (starter, combining) is a canonical composition pair. *)
+let nfc_composes starter combining =
+  let key = (starter lsl 21) lor combining in
+  let arr = Idna_tables.nfc_compositions in
+  let len = Array.length arr in
+  let lo = ref 0 in
+  let hi = ref (len - 1) in
+  while !lo <= !hi do
+    let mid = !lo + (!hi - !lo) / 2 in
+    if arr.(mid) < key then lo := mid + 1
+    else if arr.(mid) > key then hi := mid - 1
+    else (lo := mid; hi := mid - 1)
+  done;
+  !lo < len && arr.(!lo) = key
+
+(** Check NFC Quick Check — reject if any codepoint has NFC_QC=No,
+    or if NFC_QC=Maybe and preceding starter composes with it. *)
 let check_nfc_qc cps =
   if List.exists (fun cp -> Intranges.contains cp Idna_tables.nfc_qc_no) cps then
     Error "label not in NFC"
-  else Ok ()
+  else
+    let rec check_maybe prev = function
+      | [] -> Ok ()
+      | cp :: rest ->
+        if Intranges.contains cp Idna_tables.nfc_qc_maybe then
+          match prev with
+          | Some p when nfc_composes p cp -> Error "label not in NFC"
+          | _ -> check_maybe (Some cp) rest
+        else
+          check_maybe (Some cp) rest
+    in
+    check_maybe None cps
 
 (** Check CONTEXTO rule for a codepoint at given position. *)
 let valid_contexto cps pos cp =
@@ -147,43 +174,86 @@ let check_contextj cps =
   in
   check 0
 
-(** Check bidi rules (RFC 5893). *)
-let check_bidi cps =
-  let is_bidi cls cp = Intranges.contains cp cls in
-  let has_rtl = List.exists (fun cp ->
-    is_bidi Idna_tables.bidi_r cp
-    || is_bidi Idna_tables.bidi_al cp
-    || is_bidi Idna_tables.bidi_an cp
-  ) cps in
-  if not has_rtl then Ok ()
-  else
-    match cps with
-    | [] -> Ok ()
-    | first :: _ ->
-      let last = List.nth cps (List.length cps - 1) in
-      (* Rule 1: first must be R, AL, or L *)
-      let rtl = is_bidi Idna_tables.bidi_r first || is_bidi Idna_tables.bidi_al first in
-      let ltr = is_bidi Idna_tables.bidi_l first in
-      if not (rtl || ltr) then Error "bidi: first char must be R, AL, or L"
-      else if rtl then begin
-        (* RTL label: last must be R, AL, EN, AN (ignoring NSM) *)
-        let effective_last =
-          let rec find_non_nsm = function
-            | [] -> last
-            | [x] -> x
-            | x :: rest ->
-              if is_bidi Idna_tables.bidi_nsm x then find_non_nsm rest
-              else x
-          in
-          find_non_nsm (List.rev cps)
-        in
-        if not (is_bidi Idna_tables.bidi_r effective_last
-                || is_bidi Idna_tables.bidi_al effective_last
-                || is_bidi Idna_tables.bidi_en effective_last
-                || is_bidi Idna_tables.bidi_an effective_last) then
+(** Bidi character class detection. *)
+let bidi_class cp =
+  let is cls = Intranges.contains cp cls in
+  if is Idna_tables.bidi_r then `R
+  else if is Idna_tables.bidi_l then `L
+  else if is Idna_tables.bidi_al then `AL
+  else if is Idna_tables.bidi_an then `AN
+  else if is Idna_tables.bidi_en then `EN
+  else if is Idna_tables.bidi_es then `ES
+  else if is Idna_tables.bidi_cs then `CS
+  else if is Idna_tables.bidi_et then `ET
+  else if is Idna_tables.bidi_on then `ON
+  else if is Idna_tables.bidi_bn then `BN
+  else if is Idna_tables.bidi_nsm then `NSM
+  else `Other
+
+(** Find effective last character class (skip trailing NSM). *)
+let effective_last_class cps =
+  let rec find = function
+    | [] -> `Other
+    | [x] -> bidi_class x
+    | x :: rest ->
+      if bidi_class x = `NSM then find rest
+      else bidi_class x
+  in
+  find (List.rev cps)
+
+(** Does a label contain RTL content? *)
+let label_has_rtl cps =
+  List.exists (fun cp ->
+    let c = bidi_class cp in c = `R || c = `AL || c = `AN
+  ) cps
+
+(** Check bidi rules 1-6 on a label (always enforced, for bidi domains). *)
+let check_bidi_label cps =
+  match cps with
+  | [] -> Ok ()
+  | first :: _ ->
+    let first_class = bidi_class first in
+    let rtl = first_class = `R || first_class = `AL in
+    let ltr = first_class = `L in
+    (* Rule 1: first must be R, AL, or L *)
+    if not (rtl || ltr) then Error "bidi: first char must be R, AL, or L"
+    else if rtl then begin
+      (* RTL label (rules 2, 3, 4) *)
+      let rule2_ok = List.for_all (fun cp ->
+        match bidi_class cp with
+        | `R | `AL | `AN | `EN | `ES | `CS | `ET | `ON | `BN | `NSM -> true
+        | _ -> false
+      ) cps in
+      if not rule2_ok then Error "bidi: RTL label contains invalid bidi class"
+      else
+        let last = effective_last_class cps in
+        if not (last = `R || last = `AL || last = `EN || last = `AN) then
           Error "bidi: RTL label must end with R, AL, EN, or AN"
+        else
+          let has_en = List.exists (fun cp -> bidi_class cp = `EN) cps in
+          let has_an = List.exists (fun cp -> bidi_class cp = `AN) cps in
+          if has_en && has_an then
+            Error "bidi: RTL label has both EN and AN"
+          else Ok ()
+    end else begin
+      (* LTR label (rules 5, 6) *)
+      let rule5_ok = List.for_all (fun cp ->
+        match bidi_class cp with
+        | `L | `EN | `ES | `CS | `ET | `ON | `BN | `NSM -> true
+        | _ -> false
+      ) cps in
+      if not rule5_ok then Error "bidi: LTR label contains invalid bidi class"
+      else
+        let last = effective_last_class cps in
+        if not (last = `L || last = `EN) then
+          Error "bidi: LTR label must end with L or EN"
         else Ok ()
-      end else Ok ()
+    end
+
+(** Check bidi for a single label (only if label itself has RTL). *)
+let check_bidi cps =
+  if not (label_has_rtl cps) then Ok ()
+  else check_bidi_label cps
 
 (** Validate a single Unicode label (list of codepoints). *)
 let check_unicode_label cps =
@@ -199,24 +269,41 @@ let check_unicode_label cps =
 let check_label label =
   let len = String.length label in
   if len = 0 then Error "empty label"
-  else if len > 63 then Error "label too long"
-  else if len >= 4 && String.sub label 0 4 = "xn--" then begin
-    (* A-label: decode punycode, validate unicode label *)
+  else
+    let is_xn = len >= 4
+      && String.sub (String.lowercase_ascii (String.sub label 0 4)) 0 4 = "xn--" in
+    if is_xn then begin
+      (* A-label: decode punycode, validate decoded codepoints *)
+      if label.[len - 1] = '-' then Error "A-label ends with hyphen"
+      else
+        match Punycode.decode (String.sub label 4 (len - 4)) with
+        | Error e -> Error (Printf.sprintf "invalid punycode: %s" e)
+        | Ok cps -> check_unicode_label cps
+    end else if String.to_seq label |> Seq.for_all (fun c -> Char.code c < 0x80) then begin
+      (* Pure ASCII label — lowercase and validate *)
+      let lower = String.lowercase_ascii label in
+      let cps = List.init (String.length lower) (fun i -> Char.code lower.[i]) in
+      check_hyphen_ok cps |> function
+      | Error _ as e -> e
+      | Ok () -> check_codepoints cps
+    end else begin
+      (* U-label: decode UTF-8, validate *)
+      let cps = utf8_to_cps label in
+      check_unicode_label cps
+    end
+
+(** Extract codepoints from a label (for domain-level bidi check). *)
+let label_to_cps label =
+  let len = String.length label in
+  if len >= 4 && String.sub (String.lowercase_ascii (String.sub label 0 4)) 0 4 = "xn--" then
     match Punycode.decode (String.sub label 4 (len - 4)) with
-    | Error e -> Error (Printf.sprintf "invalid punycode: %s" e)
-    | Ok cps -> check_unicode_label cps
-  end else if String.to_seq label |> Seq.for_all (fun c -> Char.code c < 0x80) then begin
-    (* Pure ASCII label — lowercase and validate *)
+    | Ok cps -> Some cps
+    | Error _ -> None
+  else if String.to_seq label |> Seq.for_all (fun c -> Char.code c < 0x80) then
     let lower = String.lowercase_ascii label in
-    let cps = List.init (String.length lower) (fun i -> Char.code lower.[i]) in
-    check_hyphen_ok cps |> function
-    | Error _ as e -> e
-    | Ok () -> check_codepoints cps
-  end else begin
-    (* U-label: decode UTF-8, validate *)
-    let cps = utf8_to_cps label in
-    check_unicode_label cps
-  end
+    Some (List.init (String.length lower) (fun i -> Char.code lower.[i]))
+  else
+    Some (utf8_to_cps label)
 
 let is_valid_hostname s =
   let len = String.length s in
@@ -225,10 +312,40 @@ let is_valid_hostname s =
   else if s.[0] = '.' then false
   else
     let labels = String.split_on_char '.' s in
-    labels <> [] && List.for_all (fun label ->
-      match check_label label with
+    if labels = [] then false
+    else
+      (* First pass: validate each label + DNS length constraint *)
+      let all_ok = List.for_all (fun label ->
+        let llen = String.length label in
+        if llen = 0 || llen > 63 then false
+        else
+          match check_label label with
+          | Ok () -> true
+          | Error _ -> false
+      ) labels in
+      if not all_ok then false
+      else
+        (* Second pass: domain-level bidi (RFC 5893) *)
+        (* If any label has RTL content, ALL labels must satisfy bidi rules *)
+        let all_cps = List.filter_map label_to_cps labels in
+        let domain_has_rtl = List.exists label_has_rtl all_cps in
+        if not domain_has_rtl then true
+        else
+          List.for_all (fun cps ->
+            match check_bidi_label cps with
+            | Ok () -> true
+            | Error _ -> false
+          ) all_cps
+
+let is_valid_hostname_bidi labels =
+  let all_cps = List.filter_map label_to_cps labels in
+  let domain_has_rtl = List.exists label_has_rtl all_cps in
+  if not domain_has_rtl then true
+  else
+    List.for_all (fun cps ->
+      match check_bidi_label cps with
       | Ok () -> true
       | Error _ -> false
-    ) labels
+    ) all_cps
 
 module Punycode = Punycode

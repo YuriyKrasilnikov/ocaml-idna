@@ -26,12 +26,24 @@ Idna.Punycode.decode "maana-pta"              (* Ok [0x6D; 0x61; 0xF1; ...] *)
 ## What it validates
 
 - Hyphen rules (no leading/trailing hyphen, no `--` at positions 3-4)
-- Label length (1-63 octets, hostname max 253)
+- Label length (1-63 octets for A-labels, hostname max 253)
 - Codepoint validity (PVALID, CONTEXTJ, CONTEXTO per RFC 5892)
-- NFC normalization quick check
+- NFC normalization check (Quick Check + composition pair detection)
 - Initial combining mark rejection
-- Bidi rules (RFC 5893)
-- A-label (xn--) Punycode decoding and validation
+- Bidi rules 1-6 (RFC 5893), including domain-level enforcement
+- A-label (xn--) Punycode decoding and validation (case-insensitive prefix)
+
+## Verified against
+
+- Unicode IdnaTestV2.txt: 3362/3362 (100%) after NV8/XV8 filter
+- RFC 3492 Section 7.1 test vectors
+
+## Not implemented
+
+- Punycode encoding (RFC 3492 Section 6.3)
+- NFC normalization (only detection, not transformation)
+- ToASCII / ToUnicode protocol operations (RFC 5891)
+- UTS #46 mapping/processing
 
 ## Regenerating Unicode tables
 
