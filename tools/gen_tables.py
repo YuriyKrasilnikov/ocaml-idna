@@ -438,6 +438,79 @@ def main():
     print("|]")
     print()
 
+    # ── UTS #46 mapping table ──
+
+    idna_mapping_path = os.path.join(UCD_DIR, "IdnaMappingTable.txt")
+    if os.path.exists(idna_mapping_path):
+        # Parse IdnaMappingTable.txt
+        uts46_mapped = {}   # cp → [mapped_cps]
+        uts46_ignored = set()
+        uts46_valid = set()
+        with open(idna_mapping_path) as f:
+            for line in f:
+                line_clean = line.split("#")[0].strip()
+                if not line_clean:
+                    continue
+                m = re.match(r"([0-9A-F]{4,6})(?:\.\.([0-9A-F]{4,6}))?\s*;\s*(\S+)(?:\s*;\s*([0-9A-F ]*))?\s*(?:;.*)?$", line_clean)
+                if not m:
+                    continue
+                start = int(m.group(1), 16)
+                end = int(m.group(2), 16) if m.group(2) else start
+                status = m.group(3).strip()
+                mapping_str = m.group(4).strip() if m.group(4) else ""
+
+                if status == "mapped":
+                    mapped_cps = [int(x, 16) for x in mapping_str.split()] if mapping_str else []
+                    for cp in range(start, end + 1):
+                        uts46_mapped[cp] = mapped_cps
+                elif status == "ignored":
+                    for cp in range(start, end + 1):
+                        uts46_ignored.add(cp)
+                elif status == "valid":
+                    for cp in range(start, end + 1):
+                        uts46_valid.add(cp)
+                # deviation: 4 codepoints, handled in code
+                # disallowed: everything else
+
+        # Emit mapping index + data (flat array approach)
+        # Index: sorted (cp, data_offset, data_length)
+        # Data: flat array of all mapping codepoints
+        data = []
+        index = []
+        for cp in sorted(uts46_mapped.keys()):
+            mapped_cps = uts46_mapped[cp]
+            offset = len(data)
+            data.extend(mapped_cps)
+            index.append((cp, offset, len(mapped_cps)))
+
+        print(f"(* UTS #46 mapping: {len(index)} mapped, {len(uts46_ignored)} ignored, {len(uts46_valid)} valid *)")
+        print()
+
+        print("let uts46_map_index = [|")
+        for cp, offset, length in index:
+            print(f"  (0x{cp:04X}, {offset}, {length});")
+        print("|]")
+        print()
+
+        print("let uts46_map_data = [|")
+        for i in range(0, len(data), 16):
+            chunk = data[i:i+16]
+            print("  " + "; ".join(f"0x{cp:04X}" for cp in chunk) + ";")
+        print("|]")
+        print()
+
+        # Ignored codepoints as ranges
+        emit_array("uts46_ignored", to_ranges(uts46_ignored))
+
+        # Valid codepoints as ranges (for status lookup)
+        emit_array("uts46_valid", to_ranges(uts46_valid))
+
+        # Deviation: hardcoded in OCaml code (ß, ς, ZWJ, ZWNJ)
+
+        print(f"(* UTS46: mapped={len(index)}, ignored={len(uts46_ignored)}, valid={len(uts46_valid)} *)")
+    else:
+        print("(* IdnaMappingTable.txt not found — UTS #46 tables not generated *)")
+
     # Stats
     print(f"(* Stats: PVALID={len(classes['PVALID'])}, CONTEXTJ={len(classes['CONTEXTJ'])}, CONTEXTO={len(classes['CONTEXTO'])} *)")
     print(f"(* Bidi classes: {', '.join(f'{k}={len(v)}' for k,v in sorted(bidi_classes.items()))} *)")

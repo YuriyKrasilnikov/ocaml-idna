@@ -9,3 +9,7 @@
 (executable
  (name test_nfc)
  (libraries idna))
+
+(executable
+ (name test_uts46)
+ (libraries idna))

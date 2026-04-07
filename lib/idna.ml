@@ -512,4 +512,225 @@ let is_valid_hostname_bidi labels =
       | Error _ -> false
     ) all_cps
 
+(* ── UTS #46 Processing ── *)
+
+(** Lookup UTS #46 mapping for a codepoint.
+    Returns: `Map cps | `Ignored | `Valid | `Deviation | `Disallowed *)
+let uts46_status cp =
+  (* Deviation characters: ß, ς, ZWJ, ZWNJ *)
+  if cp = 0x00DF || cp = 0x03C2 || cp = 0x200C || cp = 0x200D then `Deviation
+  else if Intranges.contains cp Idna_tables.uts46_ignored then `Ignored
+  else
+    (* Binary search in mapping index *)
+    let arr = Idna_tables.uts46_map_index in
+    let len = Array.length arr in
+    let lo = ref 0 in
+    let hi = ref (len - 1) in
+    let found = ref (-1) in
+    while !lo <= !hi do
+      let mid = !lo + (!hi - !lo) / 2 in
+      let (mcp, _, _) = arr.(mid) in
+      if mcp < cp then lo := mid + 1
+      else if mcp > cp then hi := mid - 1
+      else (found := mid; lo := !hi + 1)
+    done;
+    if !found >= 0 then
+      let (_, offset, length) = arr.(!found) in
+      let cps = List.init length (fun i -> Idna_tables.uts46_map_data.(offset + i)) in
+      `Map cps
+    else if Intranges.contains cp Idna_tables.uts46_valid then `Valid
+    else `Disallowed
+
+(** UTS #46 Step 1: Map codepoints (Nontransitional). *)
+let uts46_map cps =
+  List.concat_map (fun cp ->
+    match uts46_status cp with
+    | `Map mapped -> mapped
+    | `Ignored -> []
+    | `Valid | `Deviation -> [cp]
+    | `Disallowed -> [cp]  (* kept, will be caught in validation *)
+  ) cps
+
+(** UTS #46 Step 3: Break on dots (U+002E, U+3002, U+FF0E, U+FF61). *)
+let split_on_dots cps =
+  let rec split acc current = function
+    | [] -> List.rev (List.rev current :: acc)
+    | cp :: rest ->
+      if cp = 0x002E || cp = 0x3002 || cp = 0xFF0E || cp = 0xFF61 then
+        split (List.rev current :: acc) [] rest
+      else
+        split acc (cp :: current) rest
+  in
+  split [] [] cps
+
+(** Encode codepoints to UTF-8 string. *)
+let cps_to_utf8 cps =
+  let buf = Buffer.create 64 in
+  List.iter (fun cp ->
+    if cp < 0x80 then Buffer.add_char buf (Char.chr cp)
+    else if cp < 0x800 then begin
+      Buffer.add_char buf (Char.chr (0xC0 lor (cp lsr 6)));
+      Buffer.add_char buf (Char.chr (0x80 lor (cp land 0x3F)))
+    end else if cp < 0x10000 then begin
+      Buffer.add_char buf (Char.chr (0xE0 lor (cp lsr 12)));
+      Buffer.add_char buf (Char.chr (0x80 lor ((cp lsr 6) land 0x3F)));
+      Buffer.add_char buf (Char.chr (0x80 lor (cp land 0x3F)))
+    end else begin
+      Buffer.add_char buf (Char.chr (0xF0 lor (cp lsr 18)));
+      Buffer.add_char buf (Char.chr (0x80 lor ((cp lsr 12) land 0x3F)));
+      Buffer.add_char buf (Char.chr (0x80 lor ((cp lsr 6) land 0x3F)));
+      Buffer.add_char buf (Char.chr (0x80 lor (cp land 0x3F)))
+    end
+  ) cps;
+  Buffer.contents buf
+
+(** UTS #46 Section 4.1 Validity Criteria (Nontransitional).
+    Returns Ok () or Error with description. *)
+let check_label_uts46 cps =
+  let ( >>= ) r f = match r with Ok () -> f () | Error _ as e -> e in
+  (* 1. NFC *)
+  let nfc_cps = nfc cps in
+  (if nfc_cps <> cps then Error "not NFC" else Ok ()) >>= fun () ->
+  (* 2+3. Hyphens *)
+  check_hyphen_ok cps >>= fun () ->
+  (* 6. Initial combining mark *)
+  check_initial_combiner cps >>= fun () ->
+  (* 7. Each code point valid or deviation (Nontransitional) + STD3 *)
+  (let rec check = function
+    | [] -> Ok ()
+    | cp :: rest ->
+      (* UseSTD3ASCIIRules: ASCII must be letter, digit, or hyphen *)
+      if cp < 0x80 && not ((cp >= 0x61 && cp <= 0x7A) || (cp >= 0x30 && cp <= 0x39)
+                            || cp = 0x2D) then
+        Error (Printf.sprintf "disallowed ASCII U+%04X (STD3)" cp)
+      else
+        match uts46_status cp with
+        | `Valid | `Deviation -> check rest
+        | `Map _ -> Error (Printf.sprintf "mapped U+%04X in label" cp)
+        | `Ignored -> Error (Printf.sprintf "ignored U+%04X in label" cp)
+        | `Disallowed -> Error (Printf.sprintf "disallowed U+%04X in label" cp)
+  in check cps) >>= fun () ->
+  (* 8. CONTEXTJ *)
+  check_contextj cps >>= fun () ->
+  (* 9. Bidi *)
+  check_bidi cps
+
+(** UTS #46 Processing: map → NFC → split → validate.
+    Returns list of (label_cps, label_utf8) or Error. *)
+let uts46_process domain =
+  let input_cps = utf8_to_cps domain in
+  (* Step 1: Map *)
+  let mapped = uts46_map input_cps in
+  (* Step 2: NFC *)
+  let normalized = nfc mapped in
+  (* Step 3: Break on dots *)
+  let label_cps_list = split_on_dots normalized in
+  (* Step 4: Convert/Validate each label *)
+  let rec process_labels acc = function
+    | [] -> Ok (List.rev acc)
+    | label_cps :: rest ->
+      if label_cps = [] then
+        (* Empty label — allowed only as trailing (root dot), error otherwise *)
+        if rest = [] then Ok (List.rev (("", []) :: acc))
+        else Error "empty label"
+      else
+        let label_utf8 = cps_to_utf8 label_cps in
+        let is_xn =
+          List.length label_cps >= 4
+          && List.nth label_cps 0 = 0x78 (* x *)
+          && List.nth label_cps 1 = 0x6E (* n *)
+          && List.nth label_cps 2 = 0x2D (* - *)
+          && List.nth label_cps 3 = 0x2D (* - *)
+        in
+        if is_xn then begin
+          (* A-label: check trailing hyphen, decode punycode, validate decoded *)
+          let llen = String.length label_utf8 in
+          if llen > 0 && label_utf8.[llen - 1] = '-' then
+            Error "A-label ends with hyphen"
+          else
+          let encoded = String.sub label_utf8 4 (String.length label_utf8 - 4) in
+          match Punycode.decode encoded with
+          | Error e -> Error (Printf.sprintf "punycode: %s" e)
+          | Ok decoded_cps ->
+            match check_label_uts46 decoded_cps with
+            | Error e -> Error e
+            | Ok () ->
+              let u_label = cps_to_utf8 decoded_cps in
+              process_labels ((u_label, decoded_cps) :: acc) rest
+        end else
+          match check_label_uts46 label_cps with
+          | Error e -> Error e
+          | Ok () ->
+            process_labels ((label_utf8, label_cps) :: acc) rest
+  in
+  process_labels [] label_cps_list
+
+(** Domain-level bidi check for UTS #46 processed labels. *)
+let check_domain_bidi labels_cps =
+  let all_cps = List.filter (fun cps -> cps <> []) labels_cps in
+  let domain_has_rtl = List.exists label_has_rtl all_cps in
+  if not domain_has_rtl then Ok ()
+  else
+    let rec check = function
+      | [] -> Ok ()
+      | cps :: rest ->
+        match check_bidi_label cps with
+        | Error e -> Error e
+        | Ok () -> check rest
+    in
+    check all_cps
+
+let to_unicode domain =
+  if String.length domain = 0 then Error "empty input"
+  else
+  match uts46_process domain with
+  | Error e -> Error e
+  | Ok labels ->
+    (* Domain-level bidi *)
+    let all_cps = List.map snd labels in
+    match check_domain_bidi all_cps with
+    | Error e -> Error e
+    | Ok () ->
+      let parts = List.map fst labels in
+      Ok (String.concat "." parts)
+
+let to_ascii domain =
+  if String.length domain = 0 then Error "empty input"
+  else
+  match uts46_process domain with
+  | Error e -> Error e
+  | Ok labels ->
+    let all_cps = List.map snd labels in
+    match check_domain_bidi all_cps with
+    | Error e -> Error e
+    | Ok () ->
+      let encode_label (utf8, cps) =
+        let is_ascii = List.for_all (fun cp -> cp < 0x80) cps in
+        if is_ascii || cps = [] then Ok utf8
+        else
+          match Punycode.encode cps with
+          | Error e -> Error e
+          | Ok encoded -> Ok ("xn--" ^ encoded)
+      in
+      let rec encode_all acc = function
+        | [] -> Ok (List.rev acc)
+        | label :: rest ->
+          match encode_label label with
+          | Error e -> Error e
+          | Ok a -> encode_all (a :: acc) rest
+      in
+      match encode_all [] labels with
+      | Error e -> Error e
+      | Ok parts ->
+        (* A4_2: reject trailing empty label *)
+        if parts <> [] && List.nth parts (List.length parts - 1) = "" then
+          Error "trailing dot (empty label)"
+        else
+          let result = String.concat "." parts in
+          let rlen = String.length result in
+          if rlen > 253 then Error "domain too long"
+          else if List.exists (fun p -> String.length p > 63) parts then
+            Error "label too long"
+          else Ok result
+
 module Punycode = Punycode

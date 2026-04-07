@@ -24,6 +24,16 @@ val is_valid_hostname_bidi : string list -> bool
     and canonical composition including Hangul syllables. *)
 val nfc : int list -> int list
 
+(** Convert a domain name to its ASCII-compatible form (UTS #46 Nontransitional).
+    Maps, normalizes to NFC, splits on dots, validates, and Punycode-encodes
+    non-ASCII labels. Returns the ASCII domain or an error. *)
+val to_ascii : string -> (string, string) result
+
+(** Convert a domain name to its Unicode form (UTS #46 Nontransitional).
+    Maps, normalizes to NFC, splits on dots, validates, and Punycode-decodes
+    xn-- labels. Returns the Unicode domain or an error. *)
+val to_unicode : string -> (string, string) result
+
 (** Punycode encoding and decoding (RFC 3492). *)
 module Punycode : sig
   (** Decode a Punycode string to a list of Unicode codepoints. *)

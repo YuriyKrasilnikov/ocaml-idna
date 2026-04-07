@@ -18,11 +18,11 @@
 
 (package
  (name idna)
- (synopsis "IDNA2008 and Punycode for OCaml (RFC 5890/5892/3492)")
+ (synopsis "Internationalized Domain Names for OCaml (IDNA 2008 and UTS #46)")
  (description
-  "Pure OCaml implementation of IDNA2008 (RFC 5890/5892) hostname validation
-   and Punycode (RFC 3492) encoding/decoding. Uses Unicode 16.0.0 character
-   tables with O(log n) codepoint lookup. No external C dependencies.")
+  "Pure OCaml implementation of IDNA2008 hostname validation, UTS #46
+   compatibility processing, Punycode encoding/decoding, and Unicode NFC
+   normalization. Uses Unicode 16.0.0 character tables. No C dependencies.")
  (depends
   (ocaml (>= 5.1))
   (alcotest :with-test)))
