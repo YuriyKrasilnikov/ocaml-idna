@@ -1,0 +1,4 @@
+(library
+ (name idna_tables)
+ (public_name idna.tables)
+ (enabled_if (= %{ocaml-config:word_size} 64)))

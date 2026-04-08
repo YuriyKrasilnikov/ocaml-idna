@@ -1,4 +1,4 @@
 (library
  (name idna)
  (public_name idna)
- (private_modules intranges idna_tables))
+ (libraries intranges idna_tables))

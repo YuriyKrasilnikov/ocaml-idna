@@ -1,0 +1,4 @@
+(library
+ (name intranges)
+ (public_name idna.intranges)
+ (enabled_if (= %{ocaml-config:word_size} 32)))

@@ -1,11 +1,11 @@
-(** Binary search on packed integer ranges.
-    Each element: start lsl 32 lor end_exclusive. Sorted by start. *)
+(** 64-bit packed ranges: each int = start lsl 32 lor end_exclusive. *)
+
+type t = int array
 
 let contains cp ranges =
   let len = Array.length ranges in
   if len = 0 then false
   else
-    (* Binary search: find rightmost range where start <= cp *)
     let lo = ref 0 in
     let hi = ref (len - 1) in
     while !lo <= !hi do

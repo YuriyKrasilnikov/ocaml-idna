@@ -110,22 +110,7 @@ let compose_lookup starter combining =
           && combining > t_base && combining < t_base + t_count then
     Some (starter + combining - t_base)
   else
-    let key = (starter lsl 21) lor combining in
-    let arr = Idna_tables.nfc_compositions in
-    let len = Array.length arr in
-    let lo = ref 0 in
-    let hi = ref (len - 1) in
-    while !lo <= !hi do
-      let mid = !lo + (!hi - !lo) / 2 in
-      let (mkey, _) = arr.(mid) in
-      if mkey < key then lo := mid + 1
-      else if mkey > key then hi := mid - 1
-      else (lo := mid; hi := mid - 1)
-    done;
-    if !lo < len then
-      let (mkey, composite) = arr.(!lo) in
-      if mkey = key then Some composite else None
-    else None
+    Idna_tables.nfc_compose starter combining
 
 (** Canonical composition: scan left-to-right, compose where possible. *)
 let compose cps =

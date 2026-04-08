@@ -1,15 +1,19 @@
 (tests
  (names test_punycode test_idna)
+ (modules test_punycode test_idna)
  (libraries idna alcotest))
 
 (executable
  (name test_idna_vectors)
+ (modules test_idna_vectors)
  (libraries idna str))
 
 (executable
  (name test_nfc)
+ (modules test_nfc)
  (libraries idna))
 
 (executable
  (name test_uts46)
+ (modules test_uts46)
  (libraries idna))
