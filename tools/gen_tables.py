@@ -36,7 +36,7 @@ class UCData:
         self.case_folding = {}       # cp → folded string
         self.hangul_syllable_types = collections.defaultdict(set)
         self.joining_types = {}      # cp → type_int
-        self.idna_mapping = {}       # cp → (status, [mapped_cps])
+        self.idna_mapping = {}       # cp → (status, [mapped_cps], idna2008_status?)
 
         self._load_unicode_data()
         self._load_props("PropList.txt")
@@ -46,7 +46,6 @@ class UCData:
         self._load_hangul_syllable_types()
         self._load_joining_types()
         self._load_scripts()
-        self._load_nfc_qc()
         self._load_composition_exclusions()
         self._load_idna_mapping()
 
@@ -167,22 +166,6 @@ class UCData:
                     for i in range(start, end + 1):
                         self.scripts[m.group(3)].add(i)
 
-    def _load_nfc_qc(self):
-        self.nfc_qc_no = set()
-        self.nfc_qc_maybe = set()
-        with open(self._path("DerivedNormalizationProps.txt")) as f:
-            for line in f:
-                line = line.split("#")[0].strip()
-                if not line:
-                    continue
-                m = re.match(r"([0-9A-F]{4,6})(?:\.\.([0-9A-F]{4,6}))?\s*;\s*NFC_QC\s*;\s*(\S+)", line)
-                if m:
-                    start = int(m.group(1), 16)
-                    end = int(m.group(2), 16) if m.group(2) else start
-                    target = self.nfc_qc_no if m.group(3) == "N" else self.nfc_qc_maybe
-                    for i in range(start, end + 1):
-                        target.add(i)
-
     def _load_composition_exclusions(self):
         self.composition_exclusions = set()
         with open(self._path("DerivedNormalizationProps.txt")) as f:
@@ -206,18 +189,23 @@ class UCData:
                 line = line.split("#")[0].strip()
                 if not line:
                     continue
-                m = re.match(
-                    r"([0-9A-F]{4,6})(?:\.\.([0-9A-F]{4,6}))?\s*;\s*(\S+)(?:\s*;\s*([0-9A-F ]*))?\s*(?:;.*)?$",
-                    line)
-                if not m:
+                fields = [field.strip() for field in line.split(";")]
+                if len(fields) < 2:
                     continue
-                start = int(m.group(1), 16)
-                end = int(m.group(2), 16) if m.group(2) else start
-                status = m.group(3).strip()
-                mapping_str = m.group(4).strip() if m.group(4) else ""
+                range_str = fields[0]
+                if ".." in range_str:
+                    lo, hi = range_str.split("..", 1)
+                    start = int(lo, 16)
+                    end = int(hi, 16)
+                else:
+                    start = int(range_str, 16)
+                    end = start
+                status = fields[1]
+                mapping_str = fields[2] if len(fields) > 2 else ""
+                idna2008_status = fields[3] if len(fields) > 3 and fields[3] else None
                 mapped_cps = [int(x, 16) for x in mapping_str.split()] if mapping_str else []
                 for cp in range(start, end + 1):
-                    self.idna_mapping[cp] = (status, mapped_cps)
+                    self.idna_mapping[cp] = (status, mapped_cps, idna2008_status)
 
 
 # ── Derivation ──
@@ -248,6 +236,11 @@ IGNORABLE_BLOCKS = {
     "Ancient Greek Musical Notation",
 }
 
+# RFC 5892 Section 2.7: code points frozen at their prior derived value
+# to preserve backward compatibility across Unicode versions.
+# Empty in the original specification; may be populated by future updates.
+BACKWARD_COMPATIBLE = {}
+
 
 class Derivation:
     """Derive all IDNA/NFC/bidi/UTS46 data from UCData."""
@@ -263,8 +256,11 @@ class Derivation:
         return "".join(self.data.case_folding.get(ord(c), c) for c in s)
 
     def _derive_status(self, cp):
+        # RFC 5892 Section 3 — evaluation order is normative.
         if cp in EXCEPTIONS:
             return EXCEPTIONS[cp]
+        if cp in BACKWARD_COMPATIBLE:
+            return BACKWARD_COMPATIBLE[cp]
         gc = self.data.general_category.get(cp)
         if gc is None and cp not in self.data.props.get("Noncharacter_Code_Point", set()):
             return "UNASSIGNED"
@@ -322,13 +318,22 @@ class Derivation:
         self.uts46_mapped = {}
         self.uts46_ignored = set()
         self.uts46_valid = set()
-        for cp, (status, mapped_cps) in self.data.idna_mapping.items():
+        self.uts46_deviation = set()
+        self.uts46_nv8 = set()
+        self.uts46_xv8 = set()
+        for cp, (status, mapped_cps, idna2008_status) in self.data.idna_mapping.items():
             if status == "mapped":
                 self.uts46_mapped[cp] = mapped_cps
             elif status == "ignored":
                 self.uts46_ignored.add(cp)
+            elif status == "deviation":
+                self.uts46_deviation.add(cp)
             elif status == "valid":
                 self.uts46_valid.add(cp)
+            if idna2008_status == "NV8":
+                self.uts46_nv8.add(cp)
+            elif idna2008_status == "XV8":
+                self.uts46_xv8.add(cp)
 
 
 # ── Range encoding ──
@@ -397,7 +402,10 @@ class Emitter:
 
         self._print(f"(* UTS #46 mapping: {len(index)} mapped, "
                      f"{len(derived.uts46_ignored)} ignored, "
-                     f"{len(derived.uts46_valid)} valid *)")
+                     f"{len(derived.uts46_valid)} valid, "
+                     f"{len(derived.uts46_deviation)} deviation, "
+                     f"{len(derived.uts46_nv8)} NV8, "
+                     f"{len(derived.uts46_xv8)} XV8 *)")
         self._print()
         self._print("let uts46_map_index = [|")
         for cp in sorted(index.keys()):
@@ -469,8 +477,6 @@ class Emitter64(Emitter):
             self.emit_ranges(f"bidi_{bc.lower()}", to_ranges(derived.bidi.get(bc, set())))
         self.emit_ranges("virama", to_ranges(derived.virama))
         self.emit_ranges("general_category_m", to_ranges(derived.gc_m))
-        self.emit_ranges("nfc_qc_no", to_ranges(derived.data.nfc_qc_no))
-        self.emit_ranges("nfc_qc_maybe", to_ranges(derived.data.nfc_qc_maybe))
 
     def _emit_nfc_section(self, derived):
         super()._emit_nfc_section(derived)
@@ -504,10 +510,11 @@ class Emitter64(Emitter):
         self._print()
 
     def _emit_uts46_ranges(self, derived):
-        if derived.uts46_ignored:
-            self.emit_ranges("uts46_ignored", to_ranges(derived.uts46_ignored))
-        if derived.uts46_valid:
-            self.emit_ranges("uts46_valid", to_ranges(derived.uts46_valid))
+        self.emit_ranges("uts46_ignored", to_ranges(derived.uts46_ignored))
+        self.emit_ranges("uts46_valid", to_ranges(derived.uts46_valid))
+        self.emit_ranges("uts46_deviation", to_ranges(derived.uts46_deviation))
+        self.emit_ranges("uts46_nv8", to_ranges(derived.uts46_nv8))
+        self.emit_ranges("uts46_xv8", to_ranges(derived.uts46_xv8))
 
 
 class Emitter32(Emitter):
@@ -533,8 +540,6 @@ class Emitter32(Emitter):
             self.emit_ranges(f"bidi_{bc.lower()}", to_ranges(derived.bidi.get(bc, set())))
         self.emit_ranges("virama", to_ranges(derived.virama))
         self.emit_ranges("general_category_m", to_ranges(derived.gc_m))
-        self.emit_ranges("nfc_qc_no", to_ranges(derived.data.nfc_qc_no))
-        self.emit_ranges("nfc_qc_maybe", to_ranges(derived.data.nfc_qc_maybe))
 
     def _emit_nfc_section(self, derived):
         super()._emit_nfc_section(derived)
@@ -567,10 +572,11 @@ class Emitter32(Emitter):
         self._print()
 
     def _emit_uts46_ranges(self, derived):
-        if derived.uts46_ignored:
-            self.emit_ranges("uts46_ignored", to_ranges(derived.uts46_ignored))
-        if derived.uts46_valid:
-            self.emit_ranges("uts46_valid", to_ranges(derived.uts46_valid))
+        self.emit_ranges("uts46_ignored", to_ranges(derived.uts46_ignored))
+        self.emit_ranges("uts46_valid", to_ranges(derived.uts46_valid))
+        self.emit_ranges("uts46_deviation", to_ranges(derived.uts46_deviation))
+        self.emit_ranges("uts46_nv8", to_ranges(derived.uts46_nv8))
+        self.emit_ranges("uts46_xv8", to_ranges(derived.uts46_xv8))
 
 
 # ── Main ──
@@ -584,6 +590,16 @@ def main():
                         default=os.environ.get("UCD_DIR",
                             os.path.join(os.path.dirname(__file__), "ucd-16.0.0")))
     args = parser.parse_args()
+
+    ucd_version = os.path.basename(os.path.normpath(args.ucd_dir)).removeprefix("ucd-")
+    py_version = unicodedata.unidata_version
+    if ucd_version != py_version:
+        sys.exit(
+            f"Python unicodedata version {py_version} does not match UCD {ucd_version}. "
+            f"Section 2.2 (Unstable) uses unicodedata.normalize; mismatched versions "
+            f"produce wrong classification for codepoints added after {py_version}. "
+            f"Use a Python whose unicodedata.unidata_version == {ucd_version}."
+        )
 
     data = UCData(args.ucd_dir)
     derived = Derivation(data)

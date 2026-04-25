@@ -37,11 +37,19 @@ let decode input =
   in
   let output = Array.make (String.length input * 2 + 10) 0 in
   let out_len = ref 0 in
-  (* Copy basic codepoints *)
+  (* Copy basic codepoints — must all be <= 0x7F per RFC 3492 §5 *)
+  let basic_ok = ref true in
   String.iter (fun c ->
-    output.(!out_len) <- Char.code c;
-    incr out_len
+    let code = Char.code c in
+    if code > 0x7F then basic_ok := false
+    else begin
+      output.(!out_len) <- code;
+      incr out_len
+    end
   ) basic;
+  if not !basic_ok then
+    Error "non-basic byte in basic segment"
+  else
   let n = ref initial_n in
   let i = ref 0 in
   let bias = ref initial_bias in
@@ -73,6 +81,7 @@ let decode input =
       let out = !out_len + 1 in
       bias := adapt (!i - oldi) out (oldi = 0);
       n := !n + !i / out;
+      if !n > 0x10FFFF then raise Exit;
       i := !i mod out;
       (* Insert n at position i *)
       let pos = !i in

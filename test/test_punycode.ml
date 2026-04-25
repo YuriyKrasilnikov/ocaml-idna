@@ -211,6 +211,78 @@ let test_decode_empty () = check_decode_err ""
 let test_decode_invalid_char () = check_decode_err "!"
 let test_decode_truncated () = check_decode_err "b"
 
+(** Decode of very long digit sequence should detect overflow. *)
+let test_decode_overflow () =
+  (* Repeat "z" which is highest digit to force n/bias overflow *)
+  let input = String.make 200 'z' in
+  match Idna.Punycode.decode input with
+  | Error _ -> ()
+  | Ok cps ->
+    (* If decode succeeds, all codepoints must be <= U+10FFFF *)
+    List.iter (fun cp ->
+      if cp > 0x10FFFF then
+        Alcotest.fail (Printf.sprintf "codepoint U+%X > U+10FFFF" cp)
+    ) cps
+
+(** Decode must not produce codepoints > U+10FFFF. *)
+let test_decode_out_of_range () =
+  (* Constructed input that if uncapped would decode to cp > 0x10FFFF *)
+  let candidates = [
+    "zzzzzzzzz"; "y-zzzzzzzz"; "a-zzzzzzzzzz";
+  ] in
+  List.iter (fun input ->
+    match Idna.Punycode.decode input with
+    | Error _ -> ()
+    | Ok cps ->
+      List.iter (fun cp ->
+        if cp > 0x10FFFF then
+          Alcotest.fail (Printf.sprintf "%s: decoded U+%X > U+10FFFF" input cp)
+      ) cps
+  ) candidates
+
+(** Non-basic byte in basic segment (before delimiter) should be rejected.
+    RFC 3492 §5: basic codepoints must be <= 0x7F. Decoder that silently
+    accepts high bytes produces out-of-spec output. *)
+let test_decode_non_basic_in_basic () =
+  match Idna.Punycode.decode "\xC3\xA9-abc" with
+  | Error _ -> ()
+  | Ok cps ->
+    (* If decoder accepts, at minimum output codepoints must all be <= 0x7F
+       in the basic prefix part (before any extended additions) *)
+    let has_non_ascii = List.exists (fun cp -> cp > 0x7F) cps in
+    if has_non_ascii then
+      Alcotest.fail "decoder accepted non-basic byte in basic segment"
+
+(** Trailing separator with empty extended part. *)
+let test_decode_trailing_separator () =
+  (* "abc-" means basic "abc" with empty extended — valid round-trip *)
+  match Idna.Punycode.decode "abc-" with
+  | Ok [0x61; 0x62; 0x63] -> ()
+  | Ok cps ->
+    Alcotest.fail (Printf.sprintf "abc- decoded to %d cps" (List.length cps))
+  | Error e -> Alcotest.fail e
+
+(** A-label symmetry: decode → validate → re-encode → compare. *)
+let test_a_label_symmetry () =
+  let valid_a_labels = [
+    "egbpdaj6bu4bxfgehfvwxn";  (* Arabic vector A *)
+    "ihqwcrb4cv8a8dqg056pqjye";  (* Chinese vector B *)
+    "nxasklbyqplrmtibl";
+  ] in
+  List.iter (fun ace ->
+    match Idna.Punycode.decode ace with
+    | Error e -> Alcotest.fail (Printf.sprintf "decode %s: %s" ace e)
+    | Ok cps ->
+      match Idna.Punycode.encode cps with
+      | Error e -> Alcotest.fail (Printf.sprintf "re-encode %s: %s" ace e)
+      | Ok reencoded ->
+        (* Case-insensitive compare per RFC 3492 §5 *)
+        let lower_ace = String.lowercase_ascii ace in
+        let lower_reenc = String.lowercase_ascii reencoded in
+        if lower_ace <> lower_reenc then
+          Alcotest.fail (Printf.sprintf "asymmetry: %s → %s" ace reencoded)
+  ) valid_a_labels
+
 (* ══════════════════════════════════════════════════════════════ *)
 (* 6. Decode: boundary                                           *)
 (* ══════════════════════════════════════════════════════════════ *)
@@ -269,6 +341,11 @@ let () =
       Alcotest.test_case "empty" `Quick test_decode_empty;
       Alcotest.test_case "invalid char" `Quick test_decode_invalid_char;
       Alcotest.test_case "truncated" `Quick test_decode_truncated;
+      Alcotest.test_case "overflow" `Quick test_decode_overflow;
+      Alcotest.test_case "out of range" `Quick test_decode_out_of_range;
+      Alcotest.test_case "non-basic in basic" `Quick test_decode_non_basic_in_basic;
+      Alcotest.test_case "trailing separator" `Quick test_decode_trailing_separator;
+      Alcotest.test_case "a-label symmetry" `Quick test_a_label_symmetry;
     ];
     "decode:boundary", [
       Alcotest.test_case "no separator" `Quick test_decode_no_sep;

@@ -1,19 +1,28 @@
+(library
+ (name test_helper)
+ (modules test_helper))
+
 (tests
- (names test_punycode test_idna)
- (modules test_punycode test_idna)
+ (names test_punycode test_idna test_lookup test_utf8 test_contexto test_diagnostics test_generated)
+ (modules test_punycode test_idna test_lookup test_utf8 test_contexto test_diagnostics test_generated)
  (libraries idna alcotest))
 
 (executable
  (name test_idna_vectors)
  (modules test_idna_vectors)
- (libraries idna str))
+ (libraries idna test_helper))
 
 (executable
  (name test_nfc)
  (modules test_nfc)
- (libraries idna))
+ (libraries idna alcotest))
 
 (executable
  (name test_uts46)
  (modules test_uts46)
- (libraries idna))
+ (libraries idna alcotest test_helper))
+
+(executable
+ (name test_generated_vectors)
+ (modules test_generated_vectors)
+ (libraries idna alcotest test_helper intranges idna_tables))

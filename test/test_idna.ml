@@ -1,17 +1,17 @@
 (* Behavioral tests for IDNA2008 hostname validation. *)
 
 let check_ok label =
-  match Idna.check_label label with
+  match Idna.Registration.check_label label with
   | Ok () -> ()
   | Error e -> Alcotest.fail (Printf.sprintf "check_label %S: %s" label e)
 
 let check_err label =
-  match Idna.check_label label with
+  match Idna.Registration.check_label label with
   | Ok () -> Alcotest.fail (Printf.sprintf "check_label %S: expected error" label)
   | Error _ -> ()
 
 let check_err_msg label expected_prefix =
-  match Idna.check_label label with
+  match Idna.Registration.check_label label with
   | Ok () -> Alcotest.fail (Printf.sprintf "check_label %S: expected error" label)
   | Error msg ->
     if not (String.length msg >= String.length expected_prefix
@@ -20,9 +20,11 @@ let check_err_msg label expected_prefix =
                        label expected_prefix msg)
 
 let valid s =
-  Alcotest.(check bool) (Printf.sprintf "valid %S" s) true (Idna.is_valid_hostname s)
+  Alcotest.(check bool)
+    (Printf.sprintf "valid %S" s) true (Idna.Registration.is_valid_hostname s)
 let invalid s =
-  Alcotest.(check bool) (Printf.sprintf "invalid %S" s) false (Idna.is_valid_hostname s)
+  Alcotest.(check bool)
+    (Printf.sprintf "invalid %S" s) false (Idna.Registration.is_valid_hostname s)
 
 (* ══════════════════════════════════════════════════════════════ *)
 (* 1. Happy path: check_label                                    *)
@@ -44,6 +46,9 @@ let test_ascii_case () =
 let test_xn_valid () =
   check_ok "xn--maana-pta"   (* mañana *)
 
+let test_xn_uppercase_rejected () =
+  check_err_msg "XN--MAANA-PTA" "A-label must be lowercase canonical form"
+
 (* U-labels (non-ASCII UTF-8) *)
 let test_ulabel () =
   check_ok "\xc3\xb1"   (* ñ, U+00F1, PVALID, bidi_l *)
@@ -62,7 +67,7 @@ let test_empty_label () =
 (* check_label does not enforce DNS length — is_valid_hostname does *)
 let test_label_too_long () =
   Alcotest.(check bool) "64-char rejected by hostname"
-    false (Idna.is_valid_hostname (String.make 64 'a'))
+    false (Idna.Registration.is_valid_hostname (String.make 64 'a'))
 
 (* ══════════════════════════════════════════════════════════════ *)
 (* 3. Hyphen rules                                               *)
@@ -298,6 +303,10 @@ let test_xn_invalid_punycode () =
 let test_xn_disallowed () =
   check_err "xn--chb89f"
 
+(* Non-canonical A-label: punycode decodes, but round-trip produces xn--nde *)
+let test_xn_noncanonical () =
+  check_err_msg "xn---nde" "A-label not in canonical form"
+
 (* ══════════════════════════════════════════════════════════════ *)
 (* 16. Boundary                                                  *)
 (* ══════════════════════════════════════════════════════════════ *)
@@ -324,12 +333,12 @@ let test_hostname_too_long () =
   invalid (String.make 254 'a')
 
 let test_hostname_max () =
-  (* 253 chars: 63.63.63.57 = 63+1+63+1+63+1+57 = 249... need exact 253 *)
+  (* 253 chars: 63+1+63+1+63+1+61 *)
   let h = String.concat "." [
     String.make 63 'a'; String.make 63 'b';
-    String.make 63 'c'; String.make 57 'd'
+    String.make 63 'c'; String.make 61 'd'
   ] in
-  Alcotest.(check bool) "len=249" true (String.length h <= 253);
+  Alcotest.(check int) "len=253" 253 (String.length h);
   valid h
 
 let test_hostname_trailing_dot () = invalid "example."
@@ -343,12 +352,16 @@ let test_hostname_xn () =
   valid "xn--maana-pta.com";
   invalid "xn--X.com"
 
+let test_hostname_bidi_digit_after_rtl () =
+  valid "\xd7\x90\xd7\x91.1com"
+
 let () =
   Alcotest.run "idna" [
     "check_label:happy", [
       Alcotest.test_case "ascii labels" `Quick test_ascii_labels;
       Alcotest.test_case "ascii case" `Quick test_ascii_case;
       Alcotest.test_case "xn-- valid" `Quick test_xn_valid;
+      Alcotest.test_case "xn-- uppercase rejected" `Quick test_xn_uppercase_rejected;
       Alcotest.test_case "u-label" `Quick test_ulabel;
       Alcotest.test_case "4-byte utf-8" `Quick test_4byte_utf8;
     ];
@@ -421,6 +434,7 @@ let () =
     "xn--", [
       Alcotest.test_case "invalid punycode" `Quick test_xn_invalid_punycode;
       Alcotest.test_case "disallowed after decode" `Quick test_xn_disallowed;
+      Alcotest.test_case "non-canonical round-trip" `Quick test_xn_noncanonical;
     ];
     "boundary", [
       Alcotest.test_case "max label 63" `Quick test_max_label;
@@ -437,5 +451,6 @@ let () =
       Alcotest.test_case "invalid label" `Quick test_hostname_invalid_label;
       Alcotest.test_case "single label" `Quick test_hostname_single_label;
       Alcotest.test_case "xn-- labels" `Quick test_hostname_xn;
+      Alcotest.test_case "bidi digit after rtl" `Quick test_hostname_bidi_digit_after_rtl;
     ];
   ]
