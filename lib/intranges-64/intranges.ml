@@ -9,10 +9,9 @@ let contains cp ranges =
     let lo = ref 0 in
     let hi = ref (len - 1) in
     while !lo <= !hi do
-      let mid = !lo + (!hi - !lo) / 2 in
+      let mid = !lo + ((!hi - !lo) / 2) in
       let mid_start = ranges.(mid) lsr 32 in
-      if mid_start <= cp then lo := mid + 1
-      else hi := mid - 1
+      if mid_start <= cp then lo := mid + 1 else hi := mid - 1
     done;
     if !hi >= 0 then
       let start = ranges.(!hi) lsr 32 in

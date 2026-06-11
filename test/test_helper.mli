@@ -1,10 +1,8 @@
 val require_files : string list -> unit
-
 val strip : string -> string
 val unquote_field : string -> string
 val decode_escapes : string -> string
 val has_errors : string -> bool
-
 val utf8_to_cps : string -> int list
 
 type cp_range = int * int

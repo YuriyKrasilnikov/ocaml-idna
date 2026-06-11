@@ -2,8 +2,8 @@
 """Generate OCaml IDNA/NFC/UTS46 tables from Unicode Character Database.
 
 Two output formats:
-  --format 64  Packed int ranges (start << 32 | end), packed composition keys
-  --format 32  Record ranges {starts; ends}, triple compositions (s, c, comp)
+  --format 64  Packed int ranges (start << 32 | end), Eytzinger packed composition keys
+  --format 32  Record ranges {starts; ends}, Eytzinger triple compositions (s, c, comp)
 
 Usage:
   ./tools/download_ucd.sh 16.0.0
@@ -37,6 +37,7 @@ class UCData:
         self.hangul_syllable_types = collections.defaultdict(set)
         self.joining_types = {}      # cp → type_int
         self.idna_mapping = {}       # cp → (status, [mapped_cps], idna2008_status?)
+        self.nfc_qc_non_yes = set()  # cp → NFC_QC is No or Maybe
 
         self._load_unicode_data()
         self._load_props("PropList.txt")
@@ -179,6 +180,13 @@ class UCData:
                     end = int(m.group(2), 16) if m.group(2) else start
                     for i in range(start, end + 1):
                         self.composition_exclusions.add(i)
+                    continue
+                m = re.match(r"([0-9A-F]{4,6})(?:\.\.([0-9A-F]{4,6}))?\s*;\s*NFC_QC\s*;\s*([NM])\b", line)
+                if m:
+                    start = int(m.group(1), 16)
+                    end = int(m.group(2), 16) if m.group(2) else start
+                    for i in range(start, end + 1):
+                        self.nfc_qc_non_yes.add(i)
 
     def _load_idna_mapping(self):
         path = self._path("IdnaMappingTable.txt")
@@ -240,6 +248,24 @@ IGNORABLE_BLOCKS = {
 # to preserve backward compatibility across Unicode versions.
 # Empty in the original specification; may be populated by future updates.
 BACKWARD_COMPATIBLE = {}
+
+
+# Packed Props bit layout. Keep in sync with the runtime Props accessors and
+# the independent checker in tools/generated_exact_check.py.
+PROP_B_UTS = 0
+PROP_B_IDNA = 3
+PROP_B_BIDI = 5
+PROP_B_CCC = 9
+PROP_B_JOIN = 17
+PROP_B_SCRIPT = 20
+PROP_B_MARK = 25
+PROP_B_NFC_QC = 26
+PROP_B_NV8 = 27
+PROP_B_XV8 = 28
+PROP_B_DECOMP = 29
+
+PROP_BIDI_ORDER = ["R", "L", "AL", "AN", "EN", "ES", "CS", "ET", "ON", "BN", "NSM"]
+PROP_BIDI_CODE = {name: i + 1 for i, name in enumerate(PROP_BIDI_ORDER)}
 
 
 class Derivation:
@@ -356,13 +382,116 @@ def to_ranges(codepoints):
     return ranges
 
 
+def build_props(data, derived):
+    bidi_by_cp = {}
+    for bidi_class, cps in derived.bidi.items():
+        if bidi_class in PROP_BIDI_CODE:
+            code = PROP_BIDI_CODE[bidi_class]
+            for cp in cps:
+                bidi_by_cp[cp] = code
+
+    idna_by_cp = {}
+    for cp in derived.classes["PVALID"]:
+        idna_by_cp[cp] = 1
+    for cp in derived.classes["CONTEXTJ"]:
+        idna_by_cp[cp] = 2
+    for cp in derived.classes["CONTEXTO"]:
+        idna_by_cp[cp] = 3
+
+    uts_by_cp = {}
+    for cp in derived.uts46_valid:
+        uts_by_cp[cp] = 1
+    for cp in derived.uts46_ignored:
+        uts_by_cp[cp] = 2
+    for cp in derived.uts46_deviation:
+        uts_by_cp[cp] = 3
+    for cp in derived.uts46_mapped:
+        uts_by_cp[cp] = 4
+
+    script_by_cp = collections.defaultdict(int)
+    for name, bit in [
+        ("Greek", 0),
+        ("Hebrew", 1),
+        ("Han", 2),
+        ("Hiragana", 3),
+        ("Katakana", 4),
+    ]:
+        for cp in data.scripts.get(name, set()):
+            script_by_cp[cp] |= 1 << bit
+
+    props = []
+    for cp in range(0x110000):
+        value = 0
+        value |= uts_by_cp.get(cp, 0) << PROP_B_UTS
+        value |= idna_by_cp.get(cp, 0) << PROP_B_IDNA
+        value |= bidi_by_cp.get(cp, 0) << PROP_B_BIDI
+        value |= data.combining_class.get(cp, 0) << PROP_B_CCC
+        joining = data.joining_types.get(cp)
+        if joining is not None:
+            value |= (joining + 1) << PROP_B_JOIN
+        value |= script_by_cp.get(cp, 0) << PROP_B_SCRIPT
+        if cp in derived.gc_m:
+            value |= 1 << PROP_B_MARK
+        if cp in data.nfc_qc_non_yes:
+            value |= 1 << PROP_B_NFC_QC
+        if cp in derived.uts46_nv8:
+            value |= 1 << PROP_B_NV8
+        if cp in derived.uts46_xv8:
+            value |= 1 << PROP_B_XV8
+        if cp in data.decomposition:
+            value |= 1 << PROP_B_DECOMP
+        props.append(value)
+    return props
+
+
+def dedup_pages(values, page_size):
+    page_ids = {}
+    index = []
+    data = []
+    for offset in range(0, len(values), page_size):
+        page = tuple(values[offset:offset + page_size])
+        page_id = page_ids.get(page)
+        if page_id is None:
+            page_id = len(page_ids)
+            page_ids[page] = page_id
+            data.extend(page)
+        index.append(page_id)
+    return index, data
+
+
+def eytzinger_order(items):
+    """Return a 1-indexed Eytzinger layout from sorted items.
+
+    The generated lookup keeps the greatest item <= target as a candidate, then
+    performs an exact key equality check. Index 0 is a dummy slot.
+    """
+    ordered = [None] * (len(items) + 1)
+    cursor = 0
+
+    def fill(i):
+        nonlocal cursor
+        if i <= len(items):
+            fill(i * 2)
+            ordered[i] = items[cursor]
+            cursor += 1
+            fill((i * 2) + 1)
+
+    fill(1)
+    if cursor != len(items):
+        raise AssertionError("Eytzinger layout did not consume all items")
+    return ordered
+
+
 # ── Emitters ──
 
 class Emitter:
     """Base emitter with shared methods."""
 
-    def __init__(self, out):
+    def __init__(self, out, props_shape="a1-direct", props_page_size=128, uts46_map_page_size=128):
         self.out = out
+        self.props_shape = props_shape
+        self.props_page_size = props_page_size
+        self.uts46_map_page_size = uts46_map_page_size
 
     def _print(self, s=""):
         print(s, file=self.out)
@@ -400,12 +529,48 @@ class Emitter:
             data.extend(mapped_cps)
             index[cp] = (offset, len(mapped_cps))
 
+        page_size = self.uts46_map_page_size
+        if page_size <= 0 or page_size & (page_size - 1) != 0:
+            raise ValueError(f"UTS46 map page size must be a power of two: {page_size}")
+        if 0x110000 % page_size != 0:
+            raise ValueError(f"UTS46 map page size must divide Unicode domain: {page_size}")
+        dense_meta = [0] * 0x110000
+        for cp, (offset, length) in index.items():
+            if length >= 32:
+                raise ValueError(f"UTS46 mapping length does not fit metadata encoding: {length}")
+            dense_meta[cp] = ((offset + 1) << 5) | length
+        meta_index, meta_data = dedup_pages(dense_meta, page_size)
+        shift = page_size.bit_length() - 1
+        mask = page_size - 1
+
         self._print(f"(* UTS #46 mapping: {len(index)} mapped, "
                      f"{len(derived.uts46_ignored)} ignored, "
                      f"{len(derived.uts46_valid)} valid, "
                      f"{len(derived.uts46_deviation)} deviation, "
                      f"{len(derived.uts46_nv8)} NV8, "
                      f"{len(derived.uts46_xv8)} XV8 *)")
+        self._print()
+        self._print(f"(* UTS #46 mapped payload metadata: page_size={page_size}, "
+                     f"pages={len(meta_index)}, unique_pages={len(meta_data) // page_size}, "
+                     f"data_entries={len(meta_data)} *)")
+        self._print("let uts46_map_meta_index = [|")
+        for i in range(0, len(meta_index), 16):
+            chunk = meta_index[i:i + 16]
+            self._print("  " + "; ".join(str(v) for v in chunk) + ";")
+        self._print("|]")
+        self._print()
+        self._print("let uts46_map_meta_data = [|")
+        for i in range(0, len(meta_data), 12):
+            chunk = meta_data[i:i + 12]
+            self._print("  " + "; ".join(str(v) for v in chunk) + ";")
+        self._print("|]")
+        self._print()
+        self._print("let uts46_map_meta cp =")
+        self._print("  if cp < 0 || cp > 0x10FFFF then 0")
+        self._print("  else")
+        self._print(f"    let page = cp lsr {shift} in")
+        self._print(f"    let off = cp land 0x{mask:X} in")
+        self._print(f"    uts46_map_meta_data.((uts46_map_meta_index.(page) lsl {shift}) + off)")
         self._print()
         self._print("let uts46_map_index = [|")
         for cp in sorted(index.keys()):
@@ -427,6 +592,7 @@ class Emitter:
         self._emit_nfc_section(derived)
         self.emit_uts46(derived)
         self._emit_uts46_ranges(derived)
+        self.emit_props(derived)
         self._emit_stats(derived)
 
     def _emit_maps_section(self, derived):
@@ -455,6 +621,66 @@ class Emitter:
                      f"CCC={len(derived.data.combining_class)}, "
                      f"Compositions={len(derived.composition_pairs)} *)")
 
+    def emit_props(self, derived):
+        if self.props_shape != "a1-direct":
+            raise ValueError(f"unsupported props shape: {self.props_shape}")
+        page_size = self.props_page_size
+        if page_size <= 0 or page_size & (page_size - 1) != 0:
+            raise ValueError(f"props page size must be a power of two: {page_size}")
+        if 0x110000 % page_size != 0:
+            raise ValueError(f"props page size must divide Unicode domain: {page_size}")
+
+        props = build_props(derived.data, derived)
+        index, data = dedup_pages(props, page_size)
+        shift = page_size.bit_length() - 1
+        mask = page_size - 1
+
+        self._print(
+            f"(* Dense packed props: shape={self.props_shape}, page_size={page_size}, "
+            f"pages={len(index)}, unique_pages={len(data) // page_size}, "
+            f"data_entries={len(data)} *)"
+        )
+        self._print("module Props = struct")
+        self._print("  let index = [|")
+        for i in range(0, len(index), 16):
+            chunk = index[i:i + 16]
+            self._print("    " + "; ".join(str(v) for v in chunk) + ";")
+        self._print("  |]")
+        self._print()
+        self._print("  let data = [|")
+        for i in range(0, len(data), 8):
+            chunk = data[i:i + 8]
+            self._print("    " + "; ".join(f"0x{v:08X}" for v in chunk) + ";")
+        self._print("  |]")
+        self._print()
+        self._print("  let get cp =")
+        self._print("    if cp < 0 || cp > 0x10FFFF then 0")
+        self._print("    else")
+        self._print(f"      let page = cp lsr {shift} in")
+        self._print(f"      let off = cp land 0x{mask:X} in")
+        self._print(f"      data.((index.(page) lsl {shift}) + off)")
+        self._print()
+        self._print("  let uts46_status props = props land 0x7")
+        self._print("  let idna_class props = (props lsr 3) land 0x3")
+        self._print("  let bidi_class props = (props lsr 5) land 0xF")
+        self._print("  let ccc props = (props lsr 9) land 0xFF")
+        self._print("  let joining_type props = (props lsr 17) land 0x7")
+        self._print()
+        self._print("  let script_bits props = (props lsr 20) land 0x1F")
+        self._print("  let has_script_greek props = (script_bits props land 0x01) <> 0")
+        self._print("  let has_script_hebrew props = (script_bits props land 0x02) <> 0")
+        self._print("  let has_script_han props = (script_bits props land 0x04) <> 0")
+        self._print("  let has_script_hiragana props = (script_bits props land 0x08) <> 0")
+        self._print("  let has_script_katakana props = (script_bits props land 0x10) <> 0")
+        self._print()
+        self._print("  let is_mark props = (props land 0x02000000) <> 0")
+        self._print("  let is_nfc_qc_non_yes props = (props land 0x04000000) <> 0")
+        self._print("  let is_uts46_nv8 props = (props land 0x08000000) <> 0")
+        self._print("  let is_uts46_xv8 props = (props land 0x10000000) <> 0")
+        self._print("  let has_canon_decomp props = (props land 0x20000000) <> 0")
+        self._print("end")
+        self._print()
+
 
 class Emitter64(Emitter):
     """64-bit: packed int ranges, packed composition keys."""
@@ -477,34 +703,51 @@ class Emitter64(Emitter):
             self.emit_ranges(f"bidi_{bc.lower()}", to_ranges(derived.bidi.get(bc, set())))
         self.emit_ranges("virama", to_ranges(derived.virama))
         self.emit_ranges("general_category_m", to_ranges(derived.gc_m))
+        self.emit_ranges("nfc_qc_non_yes", to_ranges(derived.data.nfc_qc_non_yes))
 
     def _emit_nfc_section(self, derived):
         super()._emit_nfc_section(derived)
-        # Composition pairs with packed key
+        # Composition pairs with packed key in 1-indexed Eytzinger order.
         pairs = derived.composition_pairs
         self._print(f"(* NFC composition pairs: {len(pairs)} entries *)")
+        self._print("(* Eytzinger layout, index 0 is a dummy slot. *)")
         self._print("let nfc_compositions = [|")
-        for (starter, combining) in sorted(pairs.keys()):
-            composite = pairs[(starter, combining)]
-            key = (starter << 21) | combining
+        sorted_items = [
+            ((starter << 21) | combining, pairs[(starter, combining)])
+            for (starter, combining) in sorted(pairs.keys())
+        ]
+        for item in eytzinger_order(sorted_items):
+            if item is None:
+                key, composite = 0, 0
+            else:
+                key, composite = item
             self._print(f"  (0x{key:010x}, 0x{composite:04X});")
         self._print("|]")
         self._print()
-        # nfc_compose function using packed key
+        self._print("let iter_nfc_compositions f =")
+        self._print("  for i = 1 to Array.length nfc_compositions - 1 do")
+        self._print("    let (key, composite) = nfc_compositions.(i) in")
+        self._print("      let starter = key lsr 21 in")
+        self._print("      let combining = key land ((1 lsl 21) - 1) in")
+        self._print("      f starter combining composite")
+        self._print("  done")
+        self._print()
+        # nfc_compose using Eytzinger predecessor traversal plus exact key check.
         self._print("let nfc_compose starter combining =")
         self._print("  let key = (starter lsl 21) lor combining in")
-        self._print("  let len = Array.length nfc_compositions in")
-        self._print("  let lo = ref 0 in")
-        self._print("  let hi = ref (len - 1) in")
-        self._print("  while !lo <= !hi do")
-        self._print("    let mid = !lo + (!hi - !lo) / 2 in")
-        self._print("    let (mkey, _) = nfc_compositions.(mid) in")
-        self._print("    if mkey < key then lo := mid + 1")
-        self._print("    else if mkey > key then hi := mid - 1")
-        self._print("    else (lo := mid; hi := mid - 1)")
+        self._print("  let len = Array.length nfc_compositions - 1 in")
+        self._print("  let i = ref 1 in")
+        self._print("  let candidate = ref 0 in")
+        self._print("  while !i <= len do")
+        self._print("    let (mkey, _) = nfc_compositions.(!i) in")
+        self._print("    if mkey <= key then begin")
+        self._print("      candidate := !i;")
+        self._print("      i := (!i * 2) + 1")
+        self._print("    end")
+        self._print("    else i := !i * 2")
         self._print("  done;")
-        self._print("  if !lo < len then")
-        self._print("    let (mkey, composite) = nfc_compositions.(!lo) in")
+        self._print("  if !candidate > 0 then")
+        self._print("    let (mkey, composite) = nfc_compositions.(!candidate) in")
         self._print("    if mkey = key then Some composite else None")
         self._print("  else None")
         self._print()
@@ -540,33 +783,48 @@ class Emitter32(Emitter):
             self.emit_ranges(f"bidi_{bc.lower()}", to_ranges(derived.bidi.get(bc, set())))
         self.emit_ranges("virama", to_ranges(derived.virama))
         self.emit_ranges("general_category_m", to_ranges(derived.gc_m))
+        self.emit_ranges("nfc_qc_non_yes", to_ranges(derived.data.nfc_qc_non_yes))
 
     def _emit_nfc_section(self, derived):
         super()._emit_nfc_section(derived)
-        # Composition pairs as triples (starter, combining, composite)
+        # Composition pairs as triples in 1-indexed Eytzinger order.
         pairs = derived.composition_pairs
         self._print(f"(* NFC composition pairs: {len(pairs)} entries *)")
+        self._print("(* Eytzinger layout, index 0 is a dummy slot. *)")
         self._print("let nfc_compositions = [|")
-        for (starter, combining) in sorted(pairs.keys()):
-            composite = pairs[(starter, combining)]
+        sorted_items = [
+            (starter, combining, pairs[(starter, combining)])
+            for (starter, combining) in sorted(pairs.keys())
+        ]
+        for item in eytzinger_order(sorted_items):
+            if item is None:
+                starter, combining, composite = 0, 0, 0
+            else:
+                starter, combining, composite = item
             self._print(f"  (0x{starter:04X}, 0x{combining:04X}, 0x{composite:04X});")
         self._print("|]")
         self._print()
-        # nfc_compose function using binary search on (starter, combining)
+        self._print("let iter_nfc_compositions f =")
+        self._print("  for i = 1 to Array.length nfc_compositions - 1 do")
+        self._print("    let (starter, combining, composite) = nfc_compositions.(i) in")
+        self._print("    f starter combining composite")
+        self._print("  done")
+        self._print()
+        # nfc_compose using Eytzinger predecessor traversal plus exact pair check.
         self._print("let nfc_compose starter combining =")
-        self._print("  let len = Array.length nfc_compositions in")
-        self._print("  let lo = ref 0 in")
-        self._print("  let hi = ref (len - 1) in")
-        self._print("  while !lo <= !hi do")
-        self._print("    let mid = !lo + (!hi - !lo) / 2 in")
-        self._print("    let (ms, mc, _) = nfc_compositions.(mid) in")
-        self._print("    let cmp = compare (ms, mc) (starter, combining) in")
-        self._print("    if cmp < 0 then lo := mid + 1")
-        self._print("    else if cmp > 0 then hi := mid - 1")
-        self._print("    else (lo := mid; hi := mid - 1)")
+        self._print("  let len = Array.length nfc_compositions - 1 in")
+        self._print("  let i = ref 1 in")
+        self._print("  let candidate = ref 0 in")
+        self._print("  while !i <= len do")
+        self._print("    let (ms, mc, _) = nfc_compositions.(!i) in")
+        self._print("    if ms < starter || (ms = starter && mc <= combining) then begin")
+        self._print("      candidate := !i;")
+        self._print("      i := (!i * 2) + 1")
+        self._print("    end")
+        self._print("    else i := !i * 2")
         self._print("  done;")
-        self._print("  if !lo < len then")
-        self._print("    let (ms, mc, composite) = nfc_compositions.(!lo) in")
+        self._print("  if !candidate > 0 then")
+        self._print("    let (ms, mc, composite) = nfc_compositions.(!candidate) in")
         self._print("    if ms = starter && mc = combining then Some composite else None")
         self._print("  else None")
         self._print()
@@ -586,6 +844,9 @@ def main():
     parser.add_argument("--format", type=int, default=64, choices=[32, 64],
                         help="64 (packed int) or 32 (parallel arrays)")
     parser.add_argument("--output", "-o", type=str, default=None)
+    parser.add_argument("--props-shape", choices=["a1-direct"], default="a1-direct")
+    parser.add_argument("--props-page-size", type=int, choices=[64, 128, 256], default=128)
+    parser.add_argument("--uts46-map-page-size", type=int, choices=[128, 256], default=128)
     parser.add_argument("--ucd-dir", type=str,
                         default=os.environ.get("UCD_DIR",
                             os.path.join(os.path.dirname(__file__), "ucd-16.0.0")))
@@ -608,7 +869,12 @@ def main():
     if args.output:
         out = open(args.output, "w")
 
-    emitter = Emitter64(out) if args.format == 64 else Emitter32(out)
+    emitter_args = {
+        "props_shape": args.props_shape,
+        "props_page_size": args.props_page_size,
+        "uts46_map_page_size": args.uts46_map_page_size,
+    }
+    emitter = Emitter64(out, **emitter_args) if args.format == 64 else Emitter32(out, **emitter_args)
     emitter.emit_all(derived)
 
     if args.output:

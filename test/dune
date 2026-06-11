@@ -2,9 +2,34 @@
  (name test_helper)
  (modules test_helper))
 
+(library
+ (name bench_workloads)
+ (modules bench_workloads)
+ (libraries idna test_helper))
+
 (tests
- (names test_punycode test_idna test_lookup test_utf8 test_contexto test_diagnostics test_generated)
- (modules test_punycode test_idna test_lookup test_utf8 test_contexto test_diagnostics test_generated)
+ (names
+  test_punycode
+  test_idna
+  test_lookup
+  test_utf8
+  test_contexto
+  test_diagnostics
+  test_surface_invariants
+  test_generated
+  test_ascii_fast_path
+  test_nfc_qc)
+ (modules
+  test_punycode
+  test_idna
+  test_lookup
+  test_utf8
+  test_contexto
+  test_diagnostics
+  test_surface_invariants
+  test_generated
+  test_ascii_fast_path
+  test_nfc_qc)
  (libraries idna alcotest))
 
 (executable
@@ -26,3 +51,56 @@
  (name test_generated_vectors)
  (modules test_generated_vectors)
  (libraries idna alcotest test_helper intranges idna_tables))
+
+(executable
+ (name dump_generated_tables)
+ (modules dump_generated_tables)
+ (libraries intranges idna_tables))
+
+(executable
+ (name bench_uts46)
+ (modules bench_uts46)
+ (libraries idna test_helper bench_workloads unix))
+
+(rule
+ (alias bench)
+ (deps
+  (alias runtest)
+  (source_tree ../tools/ucd-16.0.0))
+ (action
+  (chdir
+   %{workspace_root}
+   (run %{exe:bench_uts46.exe}))))
+
+(rule
+ (alias evidence)
+ (deps
+  (alias runtest)
+  ../tools/generated_exact_check.py
+  (source_tree ../tools/ucd-16.0.0))
+ (action
+  (progn
+   (chdir
+    %{workspace_root}
+    (run %{exe:test_idna_vectors.exe}))
+   (chdir
+    %{workspace_root}
+    (run %{exe:test_nfc.exe}))
+   (chdir
+    %{workspace_root}
+    (run %{exe:test_uts46.exe}))
+   (chdir
+    %{workspace_root}
+    (run %{exe:test_generated_vectors.exe}))
+   (chdir
+    %{workspace_root}
+    (run
+     python3
+     tools/generated_exact_check.py
+     --dump-exe
+     %{exe:dump_generated_tables.exe})))))
+
+(alias
+ (name conformance)
+ (deps
+  (alias evidence)))

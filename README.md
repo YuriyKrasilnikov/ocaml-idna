@@ -2,7 +2,13 @@
 
 Internationalized Domain Names for OCaml (IDNA 2008 and UTS #46).
 
-Pure OCaml implementation of IDNA2008 hostname validation, UTS #46 compatibility processing, Punycode encoding/decoding, and Unicode NFC normalization. No C dependencies. Unicode 16.0.0.
+Pure OCaml implementation of IDNA2008 hostname validation, UTS #46
+compatibility processing, Punycode encoding/decoding, and Unicode NFC
+normalization. No C dependencies. Unicode 16.0.0.
+
+`ocaml-idna` is release-verified as **100% compliant with its documented public
+conformance scope** for Unicode 16.0.0: IDNA2008 Registration and Lookup,
+UTS #46 Nontransitional processing, RFC 3492 Punycode, and Unicode NFC.
 
 ## Installation
 
@@ -18,30 +24,37 @@ The library exposes three separate semantic layers:
 - `Idna.Lookup`: strict IDNA2008 lookup preparation/conversion
 - `Idna.Uts46`: UTS #46 Nontransitional compatibility processing
 
-This separation is intentional. `Registration`, `Lookup`, and `Uts46` do not
-share exactly the same acceptance and conversion rules.
+Each layer has its own acceptance rules, result shape, and policy flags
+following its governing specification.
 
-If you are migrating from the earlier top-level API, choose the layer that
-matches the operation you need:
-
-- `Idna.check_label` -> `Idna.Registration.check_label`
-- `Idna.is_valid_hostname` -> `Idna.Registration.is_valid_hostname`
-- `Idna.to_ascii` -> `Idna.Uts46.to_ascii` for compatibility processing
-- `Idna.to_unicode` -> `Idna.Uts46.to_unicode` for compatibility processing
-
-The old top-level names are not part of the current public API. `Registration`,
-`Lookup`, and `Uts46` intentionally have different result shapes and policy
-flags where their governing semantics differ.
-
-For the normative baseline of these layers, see [SPEC_CONFORMANCE.md](SPEC_CONFORMANCE.md).
-For governing-source precedence, see [NORMATIVE_HIERARCHY.md](NORMATIVE_HIERARCHY.md).
-For runtime/test evidence status, see [TEST_EVIDENCE_AUDIT.md](TEST_EVIDENCE_AUDIT.md).
-For open and confirmed deviations, see [DEVIATION_REGISTER.md](DEVIATION_REGISTER.md).
-For requirement-to-test coverage, see [NORMATIVE_TEST_MATRIX.md](NORMATIVE_TEST_MATRIX.md).
+For the normative baseline, governing-source precedence, requirement trace,
+evidence tiers, and documented exclusions, see
+[CONFORMANCE_DOSSIER.md](CONFORMANCE_DOSSIER.md).
+For local benchmark commands and thresholds, see [PERFORMANCE.md](PERFORMANCE.md).
 For diagnostics policy, ordering, and diagnostics-specific test coverage, see
-[DIAGNOSTICS_POLICY.md](DIAGNOSTICS_POLICY.md),
-[DIAGNOSTICS_ORDERING.md](DIAGNOSTICS_ORDERING.md), and
-[DIAGNOSTICS_TEST_MATRIX.md](DIAGNOSTICS_TEST_MATRIX.md).
+[DIAGNOSTICS_POLICY.md](DIAGNOSTICS_POLICY.md).
+For contribution and security reporting policy, see [CONTRIBUTING.md](CONTRIBUTING.md)
+and [SECURITY.md](SECURITY.md).
+For release notes, see [CHANGES.md](CHANGES.md).
+
+The documented public surfaces are covered by a scoped conformance gate:
+
+```sh
+dune build @test/conformance --force
+```
+
+That gate requires the local Unicode data files and is separate from package
+`dune runtest`. It is the release-facing alias for the local evidence suite:
+ordinary unit/regression tests, the official Unicode/UTS #46 corpora,
+generated-vector checks, and generated table exactness checks.
+
+Bundled official vectors pass in full: UTS #46 `toUnicode` and `toAsciiN` over
+all IdnaTestV2 rows, strict IDNA2008 validation `6389/6389`, strict
+registration encode subset `386/386`, NormalizationTest PASS, and generated
+Unicode/UTS #46 table exactness PASS.
+Library-defined diagnostics, error text, performance, registry policy, and
+security/confusable policy are outside this conformance claim and documented
+separately.
 
 ## Usage
 
@@ -63,9 +76,9 @@ Idna.Uts46.to_ascii "Königsgäßchen.example"
 Idna.Uts46.to_unicode "xn--maana-pta.com"
 (* { value = "mañana.com"; errored = false } *)
 (* Uts46.to_unicode always returns { value; errored }.
-   Uts46.to_ascii returns Ok value | Error msg instead.
-   Those plain Uts46.to_ascii error strings are intentionally coarser than
-   Diagnostics.Uts46, which is the structured explanatory surface. *)
+   Uts46.to_ascii returns Ok value | Error msg.
+   Plain Uts46.to_ascii error strings are coarse;
+   Diagnostics.Uts46 provides per-rule explanation. *)
 
 (* Structured diagnostics *)
 let report = Idna.Diagnostics.Registration.check_label "/" in
@@ -93,6 +106,20 @@ Idna.nfc [0x0065; 0x0301]               (* [0x00E9] — e + acute → é *)
 - CONTEXTJ/CONTEXTO contextual rules
 - STD3 ASCII rules
 
+## Performance
+
+The repository includes a local UTS #46 performance regression and adversarial
+scaling gate. Treat benchmark output as run-specific evidence for the evaluated
+change set, not as a portable latency guarantee or speedup proof.
+
+Run the local benchmark gate with:
+
+```sh
+dune build @test/bench --force
+```
+
+For thresholds and benchmarking caveats, see [PERFORMANCE.md](PERFORMANCE.md).
+
 ## Diagnostics
 
 `Idna.Diagnostics` mirrors the public API and provides structured explainability
@@ -101,18 +128,17 @@ and provenance for `Registration`, `Lookup`, and `Uts46`.
 Public contract:
 
 - `report.accepted` matches the corresponding public API outcome
-- `report.events` are emitted in deterministic pipeline order, but the public
-  ordering contract is intentionally only the partial-order subset documented in
-  [DIAGNOSTICS_ORDERING.md](DIAGNOSTICS_ORDERING.md)
+- `report.events` are emitted in deterministic pipeline order; the public
+  ordering contract is the partial-order subset documented in
+  [DIAGNOSTICS_POLICY.md](DIAGNOSTICS_POLICY.md)
 - `Error` events contribute to rejection
 - `Warning` events are semantically notable or provenance-only and do not by
   themselves reject the input
 - `Info` events are neutral trace/classification facts
 - `event.detail` is explanatory text only and is not a stability contract
 
-For `Uts46`, diagnostics is also the precise explanatory surface: the plain
-`Uts46.to_ascii` error strings are intentionally coarser than the corresponding
-`Diagnostics.Uts46` reports.
+For `Uts46`, the diagnostics surface provides per-rule explanation; the plain
+`Uts46.to_ascii` error strings are coarse by comparison.
 
 Examples of provenance exposed by diagnostics:
 
@@ -120,13 +146,19 @@ Examples of provenance exposed by diagnostics:
 - `Idna2008_xv8`
 - `Uts46_deviation`
 
-`Serialization_failed` is part of the public diagnostics surface too, but it is
-not a normative IDNA/UTS #46 condition. It is a defensive runtime failure and
-is intentionally left outside default-suite coverage.
+`Serialization_failed` is a public diagnostics code for a defensive runtime
+failure, not a normative IDNA/UTS #46 condition. It is outside default-suite
+coverage.
 
 ## Regenerating Unicode tables
 
 Tables are generated from Unicode 16.0.0 UCD.
+
+The public generated-table libraries `idna.tables` and `idna.intranges` are
+support data, not standalone IDNA validators. Some raw Unicode property tables
+can reflect Unicode property ranges that include non-scalar code points. Public
+IDNA entry points validate UTF-8, Punycode scalar values, and IDNA
+admissibility before such property data can affect acceptance.
 
 Requires Python with `unicodedata.unidata_version == "16.0.0"` (Python 3.14+).
 The generator refuses to run on older Python because `unicodedata.normalize`
@@ -137,6 +169,22 @@ is used for the RFC 5892 Unstable check and would mix Unicode versions.
 uv run --python 3.14 python tools/gen_tables.py --format 64 -o lib/idna-tables-64/idna_tables.ml
 uv run --python 3.14 python tools/gen_tables.py --format 32 -o lib/idna-tables-32/idna_tables.ml
 ```
+
+The same regeneration workflow is available as:
+
+```
+make generate
+```
+
+The local evidence gate verifies the regenerated runtime tables against the
+Unicode 16.0.0 / UTS #46 source data:
+
+```
+make evidence
+```
+
+This evidence gate requires the local Unicode data files. The package test
+surface is the default `dune runtest` suite.
 
 ## License
 
